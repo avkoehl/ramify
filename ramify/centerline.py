@@ -68,7 +68,7 @@ class Network:
     def to_gdf(self):
         if self._meta is None or self._meta.transform is None:
             raise ValueError(
-                "to_gdf requires a georeferenced xr.DataArray input to extract()"
+                "to_gdf requires a georeferenced xr.DataArray input to extract_centerlines()"
             )
         import geopandas as gpd
         import rasterio.transform
@@ -88,7 +88,7 @@ class Network:
         return gpd.GeoDataFrame(gdf, geometry="geometry", crs=self._meta.crs)
 
 
-def extract(mask, root, tips=None, path_by="area", pixel_size=None,
+def extract_centerlines(mask, root, tips=None, path_by="area", pixel_size=None,
             open_boundary=None) -> Network:
     if path_by not in ("area", "length", "strahler"):
         raise ValueError(

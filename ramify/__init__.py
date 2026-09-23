@@ -1,13 +1,12 @@
-from .centerline import extract, Network
-from .partition import allocate, voronoi, subdivide
-from .width import widths, region_widths
+from .centerline import extract_centerlines, Network
+from .partition import partition_by_priority, partition_by_nearest, subdivide_regions
+from .width import interpolate_widths
 
 __all__ = [
-    "extract",
+    "extract_centerlines",
     "Network",
-    "allocate",
-    "voronoi",
-    "subdivide",
-    "widths",
-    "region_widths",
+    "partition_by_priority",
+    "partition_by_nearest",
+    "subdivide_regions",
+    "interpolate_widths",
 ]

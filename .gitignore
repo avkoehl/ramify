@@ -1,7 +1,7 @@
 # Project Directory Structure
 *.pdf
 cache/
-data/
+/data/
 run.py
 output
 
@@ -10,6 +10,10 @@ profile_run.py
 *.gpkg-wal
 *.gpkg-shm
 *.tif.aux.xml
+
+# raw source rasters/vectors used to build ramify/data (kept out of the repo root)
+/*.tif
+/*.gpkg
 
 # vim
 [._]*.s[a-v][a-z]

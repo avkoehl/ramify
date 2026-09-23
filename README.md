@@ -30,9 +30,9 @@ from ramify.data import load
 
 mask, root, tips = load()                       # bundled toy dataset
 
-net = ramify.extract(mask, root, tips=tips)     # centerline network of ordered paths
-regions = ramify.allocate(mask, net.rasterize(by="path"))
-widths = ramify.region_widths(mask, net.rasterize(), regions)
+net = ramify.extract_centerlines(mask, root, tips=tips)     # centerline network of ordered paths
+regions = ramify.partition_by_priority(mask, net.rasterize(by="path"))
+widths = ramify.interpolate_widths(mask, net.rasterize(), regions)
 
 net.segments                                    # DataFrame: segment_id, path_id, strahler,
                                                 #   length, weight, downstream_segment_id
@@ -50,22 +50,22 @@ Each individual component is presented below.
 ### Centerlines
 
 ```python
-net = ramify.extract(mask, root, tips=tips)
+net = ramify.extract_centerlines(mask, root, tips=tips)
 ```
 
 Skeletonizes the mask, routes from each tip to the root (pruning everything else),
 and decomposes the network into ordered paths — `path_id == 1` is the mainstem.
 
 
-![extract with tips](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/extract_tips.png)
+![extract_centerlines with tips](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/extract_centerlines_tips.png)
 
 ```python
-net = ramify.extract(mask, root)
+net = ramify.extract_centerlines(mask, root)
 ```
 
 Without tips, every skeleton endpoint becomes a tip.
 
-![extract auto tips](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/extract_auto.png)
+![extract_centerlines, auto tips](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/extract_centerlines_auto.png)
 
 Tips and root can often be derived automatically — glacier branch tips
 [Kienholz et al.,
@@ -77,30 +77,30 @@ digitized in GIS software.
 ### Partitioning
 
 ```python
-regions = ramify.allocate(mask, net.rasterize(by="path"))
+regions = ramify.partition_by_priority(mask, net.rasterize(by="path"))
 ```
 
 Assigns every pixel to a path: paths claim territory in priority order, each limited
 by the local shape radius, so wide branches claim proportionally more space at junctions.
 
-![allocate](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/allocate.png)
+![partition_by_priority](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/partition_by_priority.png)
 
 ```python
-regions = ramify.voronoi(mask, net.rasterize(by="path"))
+regions = ramify.partition_by_nearest(mask, net.rasterize(by="path"))
 ```
 
 Nearest-centerline partition — no ordering, no radius limits.
 
-![voronoi](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/voronoi.png)
+![partition_by_nearest](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/partition_by_nearest.png)
 
 ```python
-seg_regions = ramify.subdivide(regions, net)
+seg_regions = ramify.subdivide_regions(regions, net)
 ```
 
 Subdivides each path's territory further: within a territory, every pixel goes to
 its nearest centerline segment of that same path.
 
-![subdivide](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/subdivide.png)
+![subdivide_regions](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/subdivide_regions.png)
 
 ### Widths
 
@@ -110,21 +110,21 @@ or independently within each region, which keeps junction-zone pixels from
 averaging between a branch and its mainstem:
 
 ```python
-w = ramify.widths(mask, net.rasterize())
-w = ramify.region_widths(mask, net.rasterize(), regions)
+w = ramify.interpolate_widths(mask, net.rasterize())                    # whole shape
+w = ramify.interpolate_widths(mask, net.rasterize(), regions=regions)   # per region
 ```
 
-![widths domain](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/widths_domain.png)
+![interpolate_widths domain](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/interpolate_widths_domain.png)
 
 Either call also takes `method="nearest"`, which gives each pixel the width of its
 nearest centerline pixel instead of diffusing smoothly from it — piecewise
 constant, and much faster:
 
 ```python
-w = ramify.widths(mask, net.rasterize(), method="nearest")
+w = ramify.interpolate_widths(mask, net.rasterize(), method="nearest")
 ```
 
-![widths nearest](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/widths_nearest.png)
+![interpolate_widths nearest](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/interpolate_widths_nearest.png)
 
 ## Open boundaries
 
@@ -139,18 +139,18 @@ there.
 Pass `open_boundary`: a binary mask, on the same grid as the shape, marking the
 non-wall (void) pixels. Distances are then measured only to the remaining real
 walls. It is optional — omitted, every boundary is a wall (the behaviour above) —
-and accepted by `extract`, `allocate`, `widths`, and `region_widths`. Give it to
+and accepted by `extract_centerlines`, `partition_by_priority`, and `interpolate_widths`. Give it to
 every step, so all three stages measure against the same walls:
 
 ```python
-net = ramify.extract(mask, root, tips=tips, open_boundary=open_boundary)
-regions = ramify.allocate(mask, net.rasterize(by="path"), open_boundary=open_boundary)
-widths = ramify.region_widths(mask, net.rasterize(), regions,
+net = ramify.extract_centerlines(mask, root, tips=tips, open_boundary=open_boundary)
+regions = ramify.partition_by_priority(mask, net.rasterize(by="path"), open_boundary=open_boundary)
+widths = ramify.interpolate_widths(mask, net.rasterize(), regions,
                               open_boundary=open_boundary)
 ```
 
 Below, the same mask, root, and tips are reused, but the void past the outlet is
-marked open (shaded red), and the outlet `widths` no longer taper to the cut edge.
+marked open (shaded red), and the outlet widths no longer taper to the cut edge.
 Mark a region with depth rather than a thin skin along the boundary: distances are
 measured *through* the open void, so a one-pixel rind would only push the wall out
 by one pixel. 

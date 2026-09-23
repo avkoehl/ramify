@@ -1,6 +1,6 @@
 """Progress reporting for long `ramify` runs.
 
-`allocate` and `region_widths` both take an optional `progress=` callback, fired
+`partition_by_priority` and `interpolate_widths` (with `regions`) both take an optional `progress=` callback, fired
 once per path / per region just before that item is worked. This script is the
 worked example: two reporters, and a demo run on an upscaled copy of the bundled
 shape (one big mainstem region plus many small ones -- the same lopsidedness a
@@ -23,7 +23,7 @@ from ramify.data import load
 
 
 def region_reporter(regions, mask, exponent=1.5, every=1.0, width=34):
-    """Weighted progress bar for region_widths, with an ETA.
+    """Weighted progress bar for interpolate_widths, with an ETA.
 
     Region sizes span orders of magnitude and the laplace solve costs ~O(n^1.5)
     in a region's pixel count, so a bar driven by *region count* -- or even by
@@ -61,11 +61,11 @@ def region_reporter(regions, mask, exponent=1.5, every=1.0, width=34):
 
 
 def path_reporter(every=1.0):
-    """Activity line for allocate -- deliberately no ETA.
+    """Activity line for partition_by_priority -- deliberately no ETA.
 
-    Unlike region_widths, the caller cannot weight this honestly: a path's cost
+    Unlike interpolate_widths, the caller cannot weight this honestly: a path's cost
     is the area of the search window, which depends on the reach radius computed
-    inside allocate. Rather than fake a bar off path count (the work is heavily
+    inside partition_by_priority. Rather than fake a bar off path count (the work is heavily
     front-loaded -- paths run biggest-first, so path 1 of 19,000 can outweigh the
     next thousand), report what it is actually doing and let the reader judge.
     """
@@ -109,16 +109,16 @@ if __name__ == "__main__":
 
     print(f"shape {big.shape} = {big.size / 1e6:.1f}M cells, {int((big == 1).sum()):,} mask px")
 
-    print("extract  (no progress hook -- one opaque skeletonize dominates)")
+    print("extract_centerlines  (no progress hook -- one opaque skeletonize dominates)")
     t = time.monotonic()
-    net = ramify.extract(big, root, tips=tips)
+    net = ramify.extract_centerlines(big, root, tips=tips)
     print(f"  {len(net.segments)} segments in {time.monotonic() - t:.1f}s")
 
-    print("allocate")
-    regions = ramify.allocate(big, net.rasterize(by="path"), progress=path_reporter())
+    print("partition_by_priority")
+    regions = ramify.partition_by_priority(big, net.rasterize(by="path"), progress=path_reporter())
 
-    print("region_widths")
-    w = ramify.region_widths(
+    print("interpolate_widths")
+    w = ramify.interpolate_widths(
         big, net.rasterize(), regions, progress=region_reporter(regions, big)
     )
     print(f"  widths {np.nanmin(w):.1f} .. {np.nanmax(w):.1f}")

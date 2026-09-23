@@ -24,13 +24,25 @@ _OFFSETS = [
 ]
 
 
-def widths(mask, centerline, method="laplace", pixel_size=None, open_boundary=None):
+def interpolate_widths(mask, centerline, regions=None, method="laplace",
+                       pixel_size=None, open_boundary=None, progress=None):
     # Per-pixel width of the shape. Exact widths (2 * distance-to-boundary)
     # are taken at centerline pixels and interpolated across the mask.
+    # With `regions` (e.g. the output of partition_by_priority) the
+    # interpolation runs independently within each labeled region, so widths do
+    # not diffuse across path boundaries at junctions; `progress` applies only
+    # in that case (see _widths_by_region).
+    if regions is None:
+        return _widths_global(mask, centerline, method, pixel_size, open_boundary)
+    return _widths_by_region(mask, centerline, regions, method, pixel_size,
+                             open_boundary, progress)
+
+
+def _widths_global(mask, centerline, method, pixel_size, open_boundary):
     # method="laplace": smooth diffusion (Laplace equation, Dirichlet BCs at
     #   the centerline) — continuous fields, best for downstream analysis.
     # method="nearest": each pixel takes the width of its nearest centerline
-    #   pixel (a Voronoi-style assignment, cf. ramify.voronoi) — piecewise
+    #   pixel (a Voronoi-style assignment, cf. ramify.partition_by_nearest) — piecewise
     #   constant, fast, exact at the centerline.
     if method not in ("laplace", "nearest"):
         raise ValueError(f"method must be 'laplace' or 'nearest', got {method!r}")
@@ -78,11 +90,10 @@ def widths(mask, centerline, method="laplace", pixel_size=None, open_boundary=No
     return out
 
 
-def region_widths(mask, centerline, regions, method="laplace", pixel_size=None,
-                  open_boundary=None, progress=None):
-    # Like widths(), but interpolated independently within each labeled
-    # region (e.g. the output of ramify.allocate), so widths do not diffuse
-    # across path boundaries at junctions. Each region is seeded only by the
+def _widths_by_region(mask, centerline, regions, method, pixel_size,
+                      open_boundary, progress):
+    # Like _widths_global, but interpolated independently within each labeled
+    # region, so widths do not diffuse across path boundaries at junctions. Each region is seeded only by the
     # centerline pixels inside it. Regions containing no centerline pixels
     # are filled by nearest-centerline fallback (with a warning) so the
     # output always covers the mask.
@@ -168,8 +179,8 @@ def _neighbours(qidx, idx, dy, dx, shape):
 
 
 def _nearest(cl_bool, seed_widths):
-    # Whole-grid nearest-centerline assignment (used by widths() and as the
-    # region_widths fallback); the EDT is linear in grid size.
+    # Whole-grid nearest-centerline assignment (used by _widths_global and as the
+    # _widths_by_region fallback); the EDT is linear in grid size.
     _, idx = distance_transform_edt(~cl_bool, return_indices=True)
     return seed_widths[idx[0], idx[1]]
 

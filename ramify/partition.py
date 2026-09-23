@@ -12,7 +12,7 @@ SQRT2 = np.sqrt(2.0)
 _EDGES = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, SQRT2), (1, -1, SQRT2)]
 
 
-def allocate(mask, seeds, open_boundary=None, progress=None):
+def partition_by_priority(mask, seeds, open_boundary=None, progress=None):
     # Ordered, radius-limited claiming. Each path (seed label) claims the mask
     # pixels within *some* of its seeds' local half-width, measured as a
     # boundary-respecting (geodesic) distance -- so a wide-but-farther seed can
@@ -131,11 +131,11 @@ def _reach(mask_win, seed_rc, radii, R):
     return out
 
 
-def voronoi(mask, seeds):
+def partition_by_nearest(mask, seeds):
     # Nearest-seed partition of the mask: every pixel goes to the seed label
     # it can reach by the shortest within-mask route. No ordering, no radius
     # limits. Use for simple subdivision, e.g. splitting a path's territory
-    # by segment: voronoi(regions == path_id, segment_seeds).
+    # by segment: partition_by_nearest(regions == path_id, segment_seeds).
     mask_arr, _, meta = unwrap(mask)
     seed_arr, _, _ = unwrap(seeds)
     mask_bool = mask_arr == 1
@@ -153,8 +153,8 @@ def voronoi(mask, seeds):
     return wrap(out, meta)
 
 
-def subdivide(regions, network: Network):
-    # Subdivide each path's territory (from allocate) into segment-level
+def subdivide_regions(regions, network: Network):
+    # Subdivide each path's territory (from partition_by_priority) into segment-level
     # territories. Each territory is seeded only by its own path's segments,
     # so neighboring paths' labels (e.g. shared junction pixels) never bleed
     # across boundaries. Pixels in territories whose path has no segments in
@@ -167,7 +167,7 @@ def subdivide(regions, network: Network):
 
     # Group the territories once, then work each path inside its own bounding
     # box. Everything below is local: a full-grid pass per path would cost the
-    # whole raster ~once per path, and voronoi() runs a distance transform and
+    # whole raster ~once per path, and partition_by_nearest() runs a distance transform and
     # a watershed, so that is the expensive kind of pass. Cropping is exact
     # here -- the distance transform measures to the nearest seed and every one
     # of this path's seeds is inside its own bbox, and the watershed only ever
@@ -199,7 +199,7 @@ def subdivide(regions, network: Network):
         if not (seeds > 0).any():
             continue
 
-        sub = np.asarray(voronoi(territory, seeds))
+        sub = np.asarray(partition_by_nearest(territory, seeds))
         hit = sub > 0
         out[r0:r1, c0:c1][hit] = sub[hit]
 

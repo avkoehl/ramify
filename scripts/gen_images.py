@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from scipy.ndimage import distance_transform_edt
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -58,7 +59,7 @@ def draw_labels(ax, labeled, net=None, endpoints=False, centerline=False):
 def draw_float(ax, arr, norm, cmap="viridis", colorbar=True):
     im = ax.imshow(arr, cmap=cmap, norm=norm, interpolation="nearest")
     if colorbar:
-        plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="width")
+        plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="width (m)")
     ax.set_axis_off()
     return im
 
@@ -82,17 +83,17 @@ mask, root, tips = load()
 mask_arr = values(mask) == 1
 print(f"mask: {mask_arr.shape}, root: {root}, tips: {len(tips)}")
 
-net = ramify.extract(mask, root=root, tips=tips)
-net_auto = ramify.extract(mask, root=root)
-regions = ramify.allocate(mask, net.rasterize(by="path"))
-regions_vor = ramify.voronoi(mask, net.rasterize(by="path"))
-seg_regions = ramify.subdivide(regions, net)
-w_lap = ramify.widths(mask, net.rasterize(), method="laplace")
-w_near = ramify.widths(mask, net.rasterize(), method="nearest")
+net = ramify.extract_centerlines(mask, root=root, tips=tips)
+net_auto = ramify.extract_centerlines(mask, root=root)
+regions = ramify.partition_by_priority(mask, net.rasterize(by="path"))
+regions_vor = ramify.partition_by_nearest(mask, net.rasterize(by="path"))
+seg_regions = ramify.subdivide_regions(regions, net)
+w_lap = ramify.interpolate_widths(mask, net.rasterize(), method="laplace")
+w_near = ramify.interpolate_widths(mask, net.rasterize(), method="nearest")
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    rw_lap = ramify.region_widths(mask, net.rasterize(), regions, method="laplace")
-    rw_near = ramify.region_widths(mask, net.rasterize(), regions, method="nearest")
+    rw_lap = ramify.interpolate_widths(mask, net.rasterize(), regions, method="laplace")
+    rw_near = ramify.interpolate_widths(mask, net.rasterize(), regions, method="nearest")
 
 
 # Shared discrete log-spaced bins across every width image. Widths span more than
@@ -151,21 +152,21 @@ save("abstract.png", fig)
 
 # -- individual function outputs --------------------------------------------------
 
-save_labels("extract_tips.png", net.rasterize(by="path"), net=net, endpoints=True)
+save_labels("extract_centerlines_tips.png", net.rasterize(by="path"), net=net, endpoints=True)
 save_labels(
-    "extract_auto.png", net_auto.rasterize(by="path"), net=net_auto, endpoints=True
+    "extract_centerlines_auto.png", net_auto.rasterize(by="path"), net=net_auto, endpoints=True
 )
 
-save_labels("allocate.png", regions, net=net, centerline=True)
-save_labels("voronoi.png", regions_vor, net=net, centerline=True)
-save_labels("subdivide.png", seg_regions, net=net, centerline=True)
+save_labels("partition_by_priority.png", regions, net=net, centerline=True)
+save_labels("partition_by_nearest.png", regions_vor, net=net, centerline=True)
+save_labels("subdivide_regions.png", seg_regions, net=net, centerline=True)
 
 def save_with_colorbar(name, fig, axes):
     # figure-level colorbar; savefig directly because tight_layout() cannot lay
     # one out and leaves the tick labels sitting on top of the last panel
     fig.colorbar(
         plt.cm.ScalarMappable(norm=NORM, cmap=CMAP),
-        ax=axes, fraction=0.03, pad=0.04, label="width", extend="max",
+        ax=axes, fraction=0.03, pad=0.04, label="width (m)", extend="max",
     )
     fig.savefig(OUT / name, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -175,49 +176,62 @@ def save_with_colorbar(name, fig, axes):
 # domain: whole shape vs per-region, both with the default laplace interpolator
 fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 for ax, arr, title in [
-    (axes[0], w_lap, "widths(...)"),
-    (axes[1], rw_lap, "region_widths(..., regions)"),
+    (axes[0], w_lap, "interpolate_widths(...)"),
+    (axes[1], rw_lap, "interpolate_widths(..., regions)"),
 ]:
     draw_float(ax, values(arr), NORM, cmap=CMAP, colorbar=False)
     ax.set_title(title, fontfamily="monospace", fontsize=11)
-save_with_colorbar("widths_domain.png", fig, axes)
+save_with_colorbar("interpolate_widths_domain.png", fig, axes)
 
 # interpolator: nearest instead of laplace
 fig, ax = plt.subplots(figsize=(7, 6.5))
 draw_float(ax, values(w_near), NORM, cmap=CMAP, colorbar=False)
-ax.set_title('widths(..., method="nearest")', fontfamily="monospace", fontsize=11)
-save_with_colorbar("widths_nearest.png", fig, ax)
+ax.set_title('interpolate_widths(..., method="nearest")', fontfamily="monospace", fontsize=11)
+save_with_colorbar("interpolate_widths_nearest.png", fig, ax)
 
 # -- open_boundary: a boundary the shape is truncated by, not a real wall --------
-# Mark the void past the outlet as open, so half-widths there are measured to the
-# true flanking walls instead of collapsing at the cut edge. It has to be a region
-# with depth, not a thin rind along the boundary: distances are measured *through*
-# the marked void, so a one-pixel skin would just move the wall out by one pixel.
-# The right edge stops at root + 20 -- far enough to cover the whole outlet cut,
-# near enough not to also unwall the separate stretch of bank beyond it.
-rr, cc = np.ogrid[: mask_arr.shape[0], : mask_arr.shape[1]]
-open_boundary = (~mask_arr) & (rr >= root[0] - 10) & (cc <= root[1] + 20)
+# The mask is cut off at the outlet (the edge the root sits on), so the void just
+# past it is not a real wall. Mark it open so half-widths there are measured to
+# the true flanking walls instead of collapsing at the cut edge. Built in two
+# steps: select the mask pixels on the outlet edge, then buffer outward from them.
+# The buffer has to have depth, not be a thin rind along the boundary: distances
+# are measured *through* the marked void, so a one-pixel skin would just move the
+# wall out by one pixel -- hence the padding, since the toy mask ends at the cut.
+PAD, BUF, BAND = 30, 12, 2  # pixels: rows added below, buffer depth, rows above root
+res = abs(mask.rio.resolution()[1])
+x0, y0, x1, y1 = mask.rio.bounds()
+mask_p = mask.rio.pad_box(x0, y0 - PAD * res, x1, y1, constant_values=0)  # rows/cols of
+mask_p_arr = values(mask_p) == 1                                          # root unchanged
+
+rr = np.arange(mask_p_arr.shape[0])[:, None]
+has_mask_below = np.zeros_like(mask_p_arr)
+has_mask_below[:-1] = mask_p_arr[1:]
+edge = mask_p_arr & ~has_mask_below & (rr >= root[0] - BAND)  # outlet-edge pixels
+open_boundary = ~mask_p_arr & (distance_transform_edt(~edge) <= BUF) & (rr >= root[0] - BAND)
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    net_open = ramify.extract(mask, root, tips=tips, open_boundary=open_boundary)
-    regions_open = ramify.allocate(
-        mask, net_open.rasterize(by="path"), open_boundary=open_boundary
+    net_p = ramify.extract_centerlines(mask_p, root, tips=tips)
+    regions_p = ramify.partition_by_priority(mask_p, net_p.rasterize(by="path"))
+    rw_p = ramify.interpolate_widths(mask_p, net_p.rasterize(), regions_p)
+    net_open = ramify.extract_centerlines(mask_p, root, tips=tips, open_boundary=open_boundary)
+    regions_open = ramify.partition_by_priority(
+        mask_p, net_open.rasterize(by="path"), open_boundary=open_boundary
     )
-    rw_open = ramify.region_widths(
-        mask, net_open.rasterize(), regions_open, open_boundary=open_boundary
+    rw_open = ramify.interpolate_widths(
+        mask_p, net_open.rasterize(), regions_open, open_boundary=open_boundary
     )
 
 # Only the widths are worth showing: the partition is visually identical either
 # way on this shape (the skeleton and tip->root routing do not depend on the
 # boundary convention at all).
-moved = int((values(regions) != values(regions_open)).sum())
-print(f"pixels whose path changes under open_boundary: {moved} of {int(mask_arr.sum())}")
+moved = int((values(regions_p) != values(regions_open)).sum())
+print(f"pixels whose path changes under open_boundary: {moved} of {int(mask_p_arr.sum())}")
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 for ax, arr, title, mark in [
-    (axes[0], rw_lap, "region_widths(...)", False),
-    (axes[1], rw_open, "region_widths(..., open_boundary=…)", True),
+    (axes[0], rw_p, "interpolate_widths(..., regions)", False),
+    (axes[1], rw_open, "interpolate_widths(..., regions, open_boundary=…)", True),
 ]:
     draw_float(ax, values(arr), NORM, cmap=CMAP, colorbar=False)
     if mark:
