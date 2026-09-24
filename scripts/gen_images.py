@@ -8,7 +8,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from scipy.ndimage import distance_transform_edt
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -190,47 +189,34 @@ ax.set_title('interpolate_widths(..., method="nearest")', fontfamily="monospace"
 save_with_colorbar("interpolate_widths_nearest.png", fig, ax)
 
 # -- open_boundary: a boundary the shape is truncated by, not a real wall --------
-# The mask is cut off at the outlet (the edge the root sits on), so the void just
-# past it is not a real wall. Mark it open so half-widths there are measured to
-# the true flanking walls instead of collapsing at the cut edge. Built in two
-# steps: select the mask pixels on the outlet edge, then buffer outward from them.
-# The buffer has to have depth, not be a thin rind along the boundary: distances
-# are measured *through* the marked void, so a one-pixel skin would just move the
-# wall out by one pixel -- hence the padding, since the toy mask ends at the cut.
-PAD, BUF, BAND = 30, 12, 2  # pixels: rows added below, buffer depth, rows above root
-res = abs(mask.rio.resolution()[1])
-x0, y0, x1, y1 = mask.rio.bounds()
-mask_p = mask.rio.pad_box(x0, y0 - PAD * res, x1, y1, constant_values=0)  # rows/cols of
-mask_p_arr = values(mask_p) == 1                                          # root unchanged
-
-rr = np.arange(mask_p_arr.shape[0])[:, None]
-has_mask_below = np.zeros_like(mask_p_arr)
-has_mask_below[:-1] = mask_p_arr[1:]
-edge = mask_p_arr & ~has_mask_below & (rr >= root[0] - BAND)  # outlet-edge pixels
-open_boundary = ~mask_p_arr & (distance_transform_edt(~edge) <= BUF) & (rr >= root[0] - BAND)
+# Mark the void past the outlet as open, so half-widths there are measured to the
+# true flanking walls instead of collapsing at the cut edge. It has to be a region
+# with depth, not a thin rind along the boundary: distances are measured *through*
+# the marked void, so a one-pixel skin would just move the wall out by one pixel.
+# The right edge stops at root + 20 -- far enough to cover the whole outlet cut,
+# near enough not to also unwall the separate stretch of bank beyond it.
+rr, cc = np.ogrid[: mask_arr.shape[0], : mask_arr.shape[1]]
+open_boundary = (~mask_arr) & (rr >= root[0] - 10) & (cc <= root[1] + 20)
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    net_p = ramify.extract_centerlines(mask_p, root, tips=tips)
-    regions_p = ramify.partition_by_priority(mask_p, net_p.rasterize(by="path"))
-    rw_p = ramify.interpolate_widths(mask_p, net_p.rasterize(), regions_p)
-    net_open = ramify.extract_centerlines(mask_p, root, tips=tips, open_boundary=open_boundary)
+    net_open = ramify.extract_centerlines(mask, root, tips=tips, open_boundary=open_boundary)
     regions_open = ramify.partition_by_priority(
-        mask_p, net_open.rasterize(by="path"), open_boundary=open_boundary
+        mask, net_open.rasterize(by="path"), open_boundary=open_boundary
     )
     rw_open = ramify.interpolate_widths(
-        mask_p, net_open.rasterize(), regions_open, open_boundary=open_boundary
+        mask, net_open.rasterize(), regions_open, open_boundary=open_boundary
     )
 
 # Only the widths are worth showing: the partition is visually identical either
 # way on this shape (the skeleton and tip->root routing do not depend on the
 # boundary convention at all).
-moved = int((values(regions_p) != values(regions_open)).sum())
-print(f"pixels whose path changes under open_boundary: {moved} of {int(mask_p_arr.sum())}")
+moved = int((values(regions) != values(regions_open)).sum())
+print(f"pixels whose path changes under open_boundary: {moved} of {int(mask_arr.sum())}")
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 for ax, arr, title, mark in [
-    (axes[0], rw_p, "interpolate_widths(..., regions)", False),
+    (axes[0], rw_lap, "interpolate_widths(..., regions)", False),
     (axes[1], rw_open, "interpolate_widths(..., regions, open_boundary=…)", True),
 ]:
     draw_float(ax, values(arr), NORM, cmap=CMAP, colorbar=False)
