@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramify"
-version = "1.3.0"
-description = "Segment and measure binary branching shapes: centerline extraction, hierarchical space partitioning, and width interpolation"
+version = "2.0.0"
+description = "Segment and measure binary branching shapes: centerlines, hierarchical space partitioning, and width"
 keywords = [
     "centerline",
     "skeleton",
@@ -27,11 +27,12 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
+    "pandas",
     "scipy",
     "scikit-image",
-    "networkx",
+    "affine",
     "rasterio",
-    "shapely",
+    "shapely>=2.0",
     "geopandas",
     "xarray",
     "rioxarray",
@@ -40,6 +41,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "matplotlib",
+    "pytest",
 ]
 
 [tool.hatch.build.targets.wheel]

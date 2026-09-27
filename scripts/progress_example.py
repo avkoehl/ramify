@@ -1,10 +1,13 @@
 """Progress reporting for long `ramify` runs.
 
-`partition_by_priority` and `interpolate_widths` (with `regions`) both take an optional `progress=` callback, fired
-once per path / per region just before that item is worked. This script is the
-worked example: two reporters, and a demo run on an upscaled copy of the bundled
-shape (one big mainstem region plus many small ones -- the same lopsidedness a
-real basin has, which is what makes naive progress bars useless).
+`partition_priority` and `width_regions_interpolate` both take a `progress=`
+callback fired once per path/region, just before it's processed -- same
+signature, so `path_reporter` below works for either. `width_interpolate`
+(method="laplace") takes a different one, fired once per solver iteration.
+This script is the worked example: two reporters, and a demo run on an
+upscaled copy of the bundled shape (one big mainstem region plus many small
+ones -- the same lopsidedness a real basin has, which is what makes naive
+progress bars useless).
 
     python scripts/progress_example.py [zoom]
 """
@@ -22,52 +25,16 @@ import ramify
 from ramify.data import load
 
 
-def region_reporter(regions, mask, exponent=1.5, every=1.0, width=34):
-    """Weighted progress bar for interpolate_widths, with an ETA.
+def path_reporter(unit="path", every=1.0):
+    """Activity line for partition_priority / width_regions_interpolate --
+    deliberately no ETA.
 
-    Region sizes span orders of magnitude and the laplace solve costs ~O(n^1.5)
-    in a region's pixel count, so a bar driven by *region count* -- or even by
-    pixels -- races to ~99% and then sits on the trunk regions for most of the
-    wall time. The caller can weight properly because it already holds the
-    regions raster: one bincount gives every region's size up front.
-    """
-    reg = np.asarray(regions.values if hasattr(regions, "values") else regions)
-    m = np.asarray(mask.values if hasattr(mask, "values") else mask) == 1
-    weight = np.bincount(reg[m].ravel()).astype(float) ** exponent
-    total = float(weight.sum())
-    state = {"work": 0.0, "t0": time.monotonic(), "last": -1e9}
-
-    def progress(i, n, label, size):
-        now = time.monotonic()
-        frac = state["work"] / total
-        # print on a cadence, but never skip the first or last item
-        if now - state["last"] >= every or i == 0 or i == n - 1:
-            state["last"] = now
-            elapsed = now - state["t0"]
-            eta = elapsed * (1 - frac) / frac if frac > 1e-9 else float("nan")
-            filled = int(width * frac)
-            bar = "#" * filled + "." * (width - filled)
-            print(
-                f"\r  [{bar}] {frac:5.1%}  region {i + 1}/{n}"
-                f"  {size:>9,} px  eta {_mmss(eta)}   ",
-                end="", flush=True,
-            )
-        state["work"] += weight[label] if label < weight.size else 0.0
-        if i == n - 1:
-            print(f"\r  [{'#' * width}] 100.0%  {n} regions"
-                  f"  in {_mmss(time.monotonic() - state['t0'])}" + " " * 24, flush=True)
-
-    return progress
-
-
-def path_reporter(every=1.0):
-    """Activity line for partition_by_priority -- deliberately no ETA.
-
-    Unlike interpolate_widths, the caller cannot weight this honestly: a path's cost
-    is the area of the search window, which depends on the reach radius computed
-    inside partition_by_priority. Rather than fake a bar off path count (the work is heavily
-    front-loaded -- paths run biggest-first, so path 1 of 19,000 can outweigh the
-    next thousand), report what it is actually doing and let the reader judge.
+    The caller cannot weight this honestly: a path's cost is the area of the
+    search window (for partition_priority) or its region's pixel count (for
+    width_regions_interpolate), and both are heavily front-loaded (paths run
+    biggest-first, so item 1 of 19,000 can outweigh the next thousand).
+    Rather than fake a bar off item count, report what it is actually doing
+    and let the reader judge.
     """
     state = {"t0": time.monotonic(), "last": -1e9, "px": 0}
 
@@ -79,13 +46,27 @@ def path_reporter(every=1.0):
             el = now - state["t0"]
             rate = (i + 1) / el if el > 0 else 0.0
             print(
-                f"\r  path {i + 1:>6,}/{n:,}  window {size:>11,} px"
-                f"  {el:6.1f}s  {rate:7.1f} paths/s   ",
+                f"\r  {unit} {i + 1:>6,}/{n:,}  window {size:>11,} px"
+                f"  {el:6.1f}s  {rate:7.1f} {unit}s/s   ",
                 end="", flush=True,
             )
         if i == n - 1:
-            print(f"\r  {n:,} paths, {state['px']:,} window px visited,"
+            print(f"\r  {n:,} {unit}s, {state['px']:,} px visited,"
                   f" {time.monotonic() - state['t0']:.1f}s" + " " * 30, flush=True)
+
+    return progress
+
+
+def solver_reporter(every=1.0):
+    """Iteration counter for width_interpolate's Laplace solve."""
+    state = {"t0": time.monotonic(), "last": -1e9}
+
+    def progress(iteration):
+        now = time.monotonic()
+        if now - state["last"] >= every:
+            state["last"] = now
+            print(f"\r  cg iteration {iteration:>6,}  {now - state['t0']:6.1f}s   ",
+                  end="", flush=True)
 
     return progress
 
@@ -109,16 +90,21 @@ if __name__ == "__main__":
 
     print(f"shape {big.shape} = {big.size / 1e6:.1f}M cells, {int((big == 1).sum()):,} mask px")
 
-    print("extract_centerlines  (no progress hook -- one opaque skeletonize dominates)")
+    print("partition_priority")
     t = time.monotonic()
-    net = ramify.extract_centerlines(big, root, tips=tips)
-    print(f"  {len(net.segments)} segments in {time.monotonic() - t:.1f}s")
-
-    print("partition_by_priority")
-    regions = ramify.partition_by_priority(big, net.rasterize(by="path"), progress=path_reporter())
-
-    print("interpolate_widths")
-    w = ramify.interpolate_widths(
-        big, net.rasterize(), regions, progress=region_reporter(regions, big)
+    labels, net, lines = ramify.partition_priority(
+        big, root, tips=tips, progress=path_reporter(unit="path")
     )
-    print(f"  widths {np.nanmin(w):.1f} .. {np.nanmax(w):.1f}")
+    print(f"  {len(net)} segments, {len(lines)} regions in {time.monotonic() - t:.1f}s")
+
+    print("width_regions_interpolate")
+    t = time.monotonic()
+    w = ramify.width_regions_interpolate(
+        labels, lines, progress=path_reporter(unit="region")
+    )
+    print(f"  widths {np.nanmin(w):.1f} .. {np.nanmax(w):.1f} in {time.monotonic() - t:.1f}s")
+
+    print("centerline + width_interpolate (single shape, per-iteration progress)")
+    line = ramify.centerline(big, root=root)
+    w = ramify.width_interpolate(big, line, progress=solver_reporter())
+    print(f"\n  widths {np.nanmin(w):.1f} .. {np.nanmax(w):.1f}")
