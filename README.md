@@ -2,7 +2,7 @@
 
 Split a branched shape into its branches, and measure each branch.
 
-`ramify` takes a binary mask of a branching shape — a river network, a
+`ramify` takes a mask of a branching shape — a river network, a
 floodplain, a glacier, a root system, a leaf's veins — and divides it into one
 region per branch. Each region comes with its own centerline, so every branch
 can be measured on its own: length, area, and width, along its whole length.
@@ -26,7 +26,7 @@ mask, root, tips = load()   # bundled toy dataset
 labels, net, lines = ramify.partition_priority(mask, root, tips=tips)
 ```
 
-`lines` has one row per branch. Length and area come with it; mean width is
+`lines` has one row per branch and contains the length and area of each branch. You can compute
 their ratio:
 
 ```python
