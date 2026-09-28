@@ -114,10 +114,6 @@ the cell (`centerline`).
 
 ![station widths](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/widths_stations.png)
 
-Cells are straight-line (Euclidean) Voronoi cells, so on tight bends they can
-reach across the shape. Cells at the end of a line include the end cap, so
-their widths are slightly too large.
-
 ## Options
 
 ### Partition method
