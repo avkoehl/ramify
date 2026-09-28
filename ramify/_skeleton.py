@@ -5,6 +5,7 @@ partition network construction.
 import heapq
 
 import numpy as np
+from skimage.draw import line as draw_line
 from skimage.morphology import skeletonize
 from skimage.graph import MCP_Geometric
 
@@ -183,3 +184,38 @@ def prune_short_leaves(nodes, threshold_fn):
         if not removed_any:
             break
     return kept
+
+
+def disk_cut(path_nodes, half_width, mask_bool, fill=False):
+    """Replace the start of `path_nodes` with one straight chord.
+
+    Near an end, the skeleton forks toward the shape's corners (or runs past a
+    point placed on the side of a pointed end), so a path snapped to it swerves
+    before reaching the trunk. Every path node whose inscribed disk (radius =
+    local half-width, pixel units) reaches the anchor `path_nodes[0]` lies in
+    the same end blob; cut to the farthest such node and join it to the anchor
+    directly. The chord stays inside that disk, hence inside the shape -- up to
+    the slack, so each candidate chord is also rasterized and checked against
+    the mask, falling back to nearer nodes and finally the uncut path.
+
+    `fill=False` joins anchor and node as two consecutive vertices (enough for
+    a LineString); `fill=True` puts the chord's rasterized pixels in between,
+    keeping the path 8-connected for callers that work on pixel lists.
+    """
+    anchor = np.array(path_nodes[0], dtype=float)
+    pts = np.array(path_nodes, dtype=float)
+    d = np.hypot(*(pts - anchor).T)
+    r = half_width[pts[:, 0].astype(int), pts[:, 1].astype(int)]
+    slack = np.maximum(1.0, 0.1 * r)
+    passing = np.nonzero(d <= r + slack)[0]
+
+    for i in passing[::-1]:
+        if i <= 1:
+            break  # already adjacent to the anchor: nothing to cut
+        rr, cc = draw_line(*path_nodes[0], *path_nodes[i])
+        if mask_bool[rr, cc].all():
+            if fill:
+                chord = list(zip(rr.tolist(), cc.tolist()))
+                return chord[:-1] + list(path_nodes[i:])
+            return [path_nodes[0]] + list(path_nodes[i:])
+    return list(path_nodes)

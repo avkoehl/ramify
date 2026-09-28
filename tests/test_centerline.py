@@ -106,3 +106,61 @@ def test_output_is_plain_ndarray_free(toy_dataset):
     mask_np = (np.asarray(mask.values) == 1).astype(np.uint8)
     assert isinstance(ramify.centerline(mask, root=root), LineString)
     assert isinstance(ramify.centerline(mask_np, root=root), LineString)
+
+
+def test_root_end_skips_skeleton_fork(flared_bar, end_deviation, inside_mask):
+    mask, root, _ = flared_bar
+    line = ramify.centerline(mask, root=root)
+    assert line.coords[0] == (root[1] + 0.5, root[0] + 0.5)
+    assert end_deviation(line) < 1.0  # uncut path swerves ~5 px into a fork arm
+    assert inside_mask(line, mask)
+
+
+def test_tip_end_skips_skeleton_fork(flared_bar, end_deviation, inside_mask):
+    mask, tip, root = flared_bar  # flared end as the tip this time
+    line = ramify.centerline(mask, root=root, tip=tip)
+    assert line.coords[-1] == (tip[1] + 0.5, tip[0] + 0.5)
+    assert end_deviation(LineString(line.coords[::-1])) < 1.0
+    assert inside_mask(line, mask)
+
+
+def test_root_end_has_no_sideways_snap(toy_dataset, end_deviation, inside_mask):
+    # the bundled root sits on the side of a pointed end; the skeleton runs
+    # past it toward the point, so the uncut path makes a right-angle turn
+    mask, root, _ = toy_dataset
+    mask_np = (np.asarray(mask.values) == 1).astype(np.uint8)
+    line = ramify.centerline(mask_np, root=root)
+    assert end_deviation(line) < 1.0  # ~4.8 px before the cut
+    assert inside_mask(line, mask_np)
+
+
+def test_disk_cut_rejects_chord_leaving_mask():
+    from ramify._skeleton import disk_cut
+
+    # a path that detours around a background pixel; every node's disk is
+    # large enough to reach the anchor, but the straight chord to the far
+    # nodes crosses the hole, so the cut must fall back to a nearer node
+    mask = np.ones((5, 7), dtype=bool)
+    mask[2, 3] = False
+    half_width = np.full(mask.shape, 10.0)
+    path = [(2, 1), (2, 2), (1, 3), (2, 4), (2, 5)]
+    assert disk_cut(path, half_width, mask) == [(2, 1), (1, 3), (2, 4), (2, 5)]
+
+
+def test_disk_cut_leaves_path_when_no_disk_reaches_anchor():
+    from ramify._skeleton import disk_cut
+
+    mask = np.ones((5, 7), dtype=bool)
+    half_width = np.zeros(mask.shape)
+    path = [(2, 0), (2, 1), (2, 2), (1, 3), (2, 4)]
+    assert disk_cut(path, half_width, mask) == path
+
+
+def test_disk_cut_fill_keeps_path_pixel_connected():
+    from ramify._skeleton import disk_cut
+
+    mask = np.ones((7, 9), dtype=bool)
+    half_width = np.full(mask.shape, 10.0)
+    path = [(3, 0), (4, 1), (4, 2), (3, 3), (3, 4), (3, 5)]
+    assert disk_cut(path, half_width, mask) == [(3, 0), (3, 5)]
+    assert disk_cut(path, half_width, mask, fill=True) == [(3, c) for c in range(6)]

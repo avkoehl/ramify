@@ -13,6 +13,7 @@ from ._skeleton import (
     endpoints,
     tree_path,
     prune_short_leaves,
+    disk_cut,
 )
 
 
@@ -25,7 +26,10 @@ def centerline(mask, root=None, tip=None, pixel_size=None) -> LineString:
     - `tip` without `root`: raises `ValueError`.
 
     `root` / `tip` are `(row, col)` pixel indices. Orientation: starts at
-    `root` when given; otherwise deterministic but unspecified.
+    `root` when given; otherwise deterministic but unspecified. Near a given
+    `root` / `tip`, the line leaves the skeleton and runs straight to the
+    point from the farthest skeleton pixel whose inscribed disk reaches it,
+    so it doesn't swerve into the forks a skeleton makes at a shape's end.
 
     This is the *longest* path through the shape, deliberately not the
     heaviest (widest) one that `partition_priority`/`partition_nearest` would
@@ -108,6 +112,11 @@ def centerline(mask, root=None, tip=None, pixel_size=None) -> LineString:
         b = min(n for n in candidates1 if dist1[n] == best)
 
         path_nodes = list(reversed(tree_path(parent1, b, stop=a)))
+
+    if root is not None:
+        path_nodes = disk_cut(path_nodes, half_width, mask_bool)
+        if tip is not None:
+            path_nodes = disk_cut(path_nodes[::-1], half_width, mask_bool)[::-1]
 
     rows = np.array([n[0] for n in path_nodes])
     cols = np.array([n[1] for n in path_nodes])

@@ -265,13 +265,13 @@ save("quickstart.png", fig, tight=False)
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    _, net_ml, _ = ramify.partition_priority(mask, root, min_length=15.0)
+    _, net_ml, _ = ramify.partition_priority(mask, root, min_length=100.0)
     _, net_all, _ = ramify.partition_priority(mask, root)
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 6))
 for ax, net_i, title in [
     (axes[0], net, f"tips=tips ({len(tips)} tips)"),
-    (axes[1], net_ml, f"min_length=15 ({net_ml['path_id'].nunique()} paths)"),
+    (axes[1], net_ml, f"min_length=100 ({net_ml['path_id'].nunique()} paths)"),
     (axes[2], net_all, f"neither ({net_all['path_id'].nunique()} paths)"),
 ]:
     ax.imshow(mask_arr, cmap="gray_r", alpha=0.25)

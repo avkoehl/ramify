@@ -28,6 +28,7 @@ from ._skeleton import (
     prune_short_leaves,
     path_length,
     path_weight,
+    disk_cut,
 )
 from .centerline import centerline
 
@@ -153,8 +154,28 @@ def _build_network(mask_bool, root, tips, min_length, path_by, open_boundary, pi
             n = parent[n]
 
     segments = break_into_segments(kept, parent, tip_nodes, root)
+    segments = _cut_end_segments(
+        segments, root, set(tip_points), half_width_pixels(mask_bool, None), mask_bool
+    )
     edt = local_half_width(mask_bool, open_boundary, pixel_size)
     return _annotate(segments, edt, pixel_size, path_by, root)
+
+
+def _cut_end_segments(segments, root, anchors, half_width, mask_bool):
+    # Straighten the network where it meets the root and each given tip (see
+    # `disk_cut`). Each cut is confined to the one segment touching that
+    # point: a segment's other end is a junction, so the tree's topology and
+    # shared junction pixels are untouched. Auto-detected tips are skeleton
+    # endpoints already and have nothing to cut toward. Segments run
+    # upstream -> downstream, so the root is at seg[-1] and a tip at seg[0].
+    out = []
+    for seg in segments:
+        if seg[-1] == root:
+            seg = disk_cut(seg[::-1], half_width, mask_bool, fill=True)[::-1]
+        if seg[0] in anchors:
+            seg = disk_cut(seg, half_width, mask_bool, fill=True)
+        out.append(seg)
+    return out
 
 
 def _annotate(segments, edt, pixel_size, path_by, root):

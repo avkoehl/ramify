@@ -158,3 +158,65 @@ def test_length_path_by_uses_max_not_sum():
     assert by_head[(0, 5)]["path_id"] == trunk_path
     assert by_head[(0, 15)]["path_id"] == trunk_path  # longest single route wins
     assert by_head[(3, 5)]["path_id"] != trunk_path
+
+
+def test_net_root_end_has_no_sideways_snap(toy_dataset, end_deviation):
+    # same straightening as centerline(): the bundled root sits beside the
+    # skeleton, which the uncut network meets at a right angle
+    mask, root, tips = toy_dataset
+    mask_np = (np.asarray(mask.values) == 1).astype(np.uint8)
+    _, net, _ = ramify.partition_priority(mask_np, root, tips=tips)
+    outlet = net[net["downstream_segment_id"].isna()].geometry.iloc[0]
+    assert outlet.coords[0] == (root[1] + 0.5, root[0] + 0.5)
+    assert end_deviation(outlet) < 1.0  # ~4.8 px before the cut
+
+
+def test_net_tip_end_skips_skeleton_fork(flared_bar, end_deviation):
+    from shapely.geometry import LineString
+
+    mask, tip, root = flared_bar  # flared end as the (given) tip
+    _, net, _ = ramify.partition_priority(mask, root, tips=[tip])
+    (line,) = net.geometry  # no junctions: one segment, cut at both ends
+    assert line.coords[-1] == (tip[1] + 0.5, tip[0] + 0.5)
+    assert end_deviation(LineString(line.coords[::-1])) < 1.0
+
+
+def _network_is_intact(df, mask_bool):
+    by_id = dict(zip(df["segment_id"], df["pixels"]))
+    for seg_id, down, pixels in zip(df["segment_id"], df["downstream_segment_id"], df["pixels"]):
+        steps = zip(pixels[:-1], pixels[1:])
+        if not all(max(abs(a[0] - b[0]), abs(a[1] - b[1])) == 1 for a, b in steps):
+            return False
+        if not all(mask_bool[r, c] for r, c in pixels):
+            return False
+        # segments run upstream -> downstream, sharing the junction pixel
+        if not pd.isna(down) and pixels[-1] != by_id[int(down)][0]:
+            return False
+    return True
+
+
+def test_end_cut_stops_at_junction_near_root():
+    from skimage.draw import polygon
+    from ramify.partition import _build_network
+
+    # flared end with a thin tributary joining inside the root's end disk:
+    # the root cut must stay on the short root segment, not swallow the
+    # junction
+    mask = np.zeros((50, 70), dtype=np.uint8)
+    rr, cc = polygon([14, 22, 22, 38, 38, 46], [4, 24, 66, 66, 24, 4])
+    mask[rr, cc] = 1
+    mask[1:20, 14:16] = 1
+    root, tips = (30, 4), [(30, 65), (1, 14)]
+    df = _build_network(mask > 0, root, tips, None, "area", None, 1.0)
+    assert len(df) == 3
+    assert (df["downstream_segment_id"].isna()).sum() == 1
+    assert _network_is_intact(df, mask > 0)
+
+
+def test_end_cuts_keep_toy_network_intact(toy_dataset):
+    from ramify.partition import _build_network
+
+    mask, root, tips = toy_dataset
+    mask_bool = np.asarray(mask.values) == 1
+    df = _build_network(mask_bool, root, tips, None, "area", None, 1.0)
+    assert _network_is_intact(df, mask_bool)
