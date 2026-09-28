@@ -2,7 +2,7 @@
 
     python scripts/gen_images.py
 
-See README-instructions.md for the figure table this fulfills.
+See notes.md for the figure plan this fulfills.
 """
 import sys
 import warnings
@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib.gridspec import GridSpec
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -149,6 +150,55 @@ def width_norm_cmap(*arrays):
     return norm, cmap, bins
 
 
+def crop(arr, win):
+    r0, r1, c0, c1 = win
+    return arr[r0:r1, c0:c1]
+
+
+def draw_labels_win(ax, mask_arr, labels_arr, win, title=None):
+    # Colors come from the full raster so a region keeps its color when zoomed.
+    mapped, cmap, lookup, n = label_cmap(labels_arr)
+    ax.imshow(crop(mask_arr, win), cmap="gray_r", alpha=0.25)
+    ax.imshow(crop(mapped, win), cmap=cmap, vmin=0, vmax=max(n - 1, 1), interpolation="nearest")
+    if title:
+        ax.set_title(title, fontfamily="monospace", fontsize=9)
+    ax.set_axis_off()
+    return cmap, lookup, n
+
+
+def draw_stations(ax, w_arr, stations, grid, norm, cmap, win=None, points=True,
+                  cell_lw=0.4, marker=2, centerlines=None):
+    r0, c0 = (win[0], win[2]) if win else (0, 0)
+    ax.imshow(crop(w_arr, win) if win else w_arr, cmap=cmap, norm=norm, interpolation="nearest")
+    plot_geoms(ax, stations.geometry, grid, color="black", lw=cell_lw, alpha=0.6, r0=r0, c0=c0)
+    if centerlines is not None:
+        plot_geoms(ax, centerlines, grid, color="white", lw=1.6, r0=r0, c0=c0)
+        plot_geoms(ax, centerlines, grid, color="crimson", lw=0.9, r0=r0, c0=c0)
+    if points:
+        xs = np.asarray([p.x for p in stations["station"]])
+        ys = np.asarray([p.y for p in stations["station"]])
+        rr, cc = grid.to_rc(xs, ys)
+        ax.plot(cc - c0, rr - r0, "o", color="black", mfc="white", markersize=marker,
+                mew=0.6, zorder=5)
+    if win:
+        ax.set_xlim(-0.5, win[3] - win[2] - 0.5)
+        ax.set_ylim(win[1] - win[0] - 0.5, -0.5)
+    ax.set_axis_off()
+
+
+def arrow_axis(ax, text):
+    ax.set_axis_off()
+    ax.annotate("", xy=(0.95, 0.5), xytext=(0.05, 0.5), xycoords="axes fraction",
+                arrowprops=dict(arrowstyle="-|>", lw=2, color="0.3", mutation_scale=20))
+    ax.text(0.5, 0.56, text, ha="center", va="bottom", fontfamily="monospace",
+            fontsize=9, rotation=0, transform=ax.transAxes, wrap=True)
+
+
+def width_colorbar(fig, norm, cmap, ax, **kw):
+    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
+                 label="width (m)", extend="max", **kw)
+
+
 # -- pipeline ------------------------------------------------------------------
 
 mask, root, tips = load()
@@ -158,82 +208,74 @@ print(f"mask: {mask_arr.shape}, root: {root}, tips: {len(tips)}")
 
 labels, net, lines = ramify.partition_priority(mask, root, tips=tips)
 labels_arr = values(labels)
-w_whole = values(ramify.width_regions_interpolate(labels, lines))
+w_st, stations = ramify.width_regions_stations(labels, lines, spacing=50)
+w_st = values(w_st)
+w_lap = values(ramify.width_regions_interpolate(labels, lines))
+w_near = values(ramify.width_regions_interpolate(labels, lines, method="nearest"))
 
-# 1. abstract.png: mask+root+tips -> labels+lines -> widths ----------------------
+# One width scale for every figure of the partitioned shape.
+NORM, CMAP, BINS = width_norm_cmap(w_st, w_lap, w_near)
+print(f"width bins ({len(BINS)}): {BINS}")
 
-fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+FULL = (0, mask_arr.shape[0], 0, mask_arr.shape[1])
+JUNCTION_WIN = (115, 215, 150, 265)  # mainstem with paths 3 and 6 joining it
+BRANCH_WIN = (140, 215, 150, 275)    # path 3 where it joins the mainstem
 
-axes[0].imshow(np.ma.masked_where(~mask_arr, mask_arr.astype(int)), cmap="gray", vmin=0, vmax=2)
-axes[0].plot(root[1], root[0], "k*", markersize=14, mec="w", label="root")
+# 1. abstract.png: mask+root+tips -> labels+lines -> station widths --------------
+
+fig = plt.figure(figsize=(17, 5.6))
+gs = GridSpec(1, 6, figure=fig, width_ratios=[1, 0.22, 1, 0.22, 1, 0.04], wspace=0.02)
+ax_in, ax_a1, ax_lab, ax_a2, ax_w, ax_cb = (fig.add_subplot(gs[0, i]) for i in range(6))
+
+ax_in.imshow(np.ma.masked_where(~mask_arr, mask_arr.astype(int)), cmap="gray", vmin=0, vmax=2)
+ax_in.plot(root[1], root[0], "k*", markersize=14, mec="w", label="root")
 tr, tc = zip(*tips)
-axes[0].plot(tc, tr, "wo", markersize=5, mec="k", label="tips")
-axes[0].legend(loc="lower right", fontsize=8)
-axes[0].set_title("mask, root, tips", fontfamily="monospace", fontsize=10)
-axes[0].set_axis_off()
+ax_in.plot(tc, tr, "wo", markersize=5, mec="k", label="tips")
+ax_in.legend(loc="lower right", fontsize=8)
+ax_in.set_title("mask, root, tips", fontfamily="monospace", fontsize=10)
+ax_in.set_axis_off()
 
-cmap, lookup, n = draw_labels(axes[1], mask_arr, labels_arr, "labels + lines")
-plot_geoms(axes[1], lines.geometry, grid, color="black", lw=1.0)
+arrow_axis(ax_a1, "partition_\npriority")
 
-im = axes[2].imshow(w_whole, cmap="viridis", interpolation="nearest")
-plt.colorbar(im, ax=axes[2], fraction=0.04, pad=0.02, label="width (m)")
-axes[2].set_title("width_regions_interpolate", fontfamily="monospace", fontsize=10)
-axes[2].set_axis_off()
+draw_labels_win(ax_lab, mask_arr, labels_arr, FULL)
+plot_geoms(ax_lab, lines.geometry, grid, color="black", lw=1.0)
+ax_lab.set_title("labels + lines", fontfamily="monospace", fontsize=10)
 
-save("abstract.png", fig)
+arrow_axis(ax_a2, "width_regions_\nstations")
 
-# 2. quickstart.png: labels + lines, root and tips marked -------------------------
+draw_stations(ax_w, w_st, stations, grid, NORM, CMAP, points=False, cell_lw=0.3)
+ax_w.set_title("station widths", fontfamily="monospace", fontsize=10)
 
-fig, ax = plt.subplots(figsize=(9, 7))
-draw_labels(ax, mask_arr, labels_arr)
-plot_geoms(ax, lines.geometry, grid, color="black", lw=1.0)
-root_rc = grid.to_rc(*grid.to_xy(np.array([root[0]]), np.array([root[1]])))
-ax.plot(root[1], root[0], "k*", markersize=14, mec="w", zorder=4)
-tr, tc = zip(*tips)
-ax.plot(tc, tr, "wo", markersize=5, mec="k", zorder=4)
-ax.set_title("partition_priority(mask, root, tips=tips)", fontfamily="monospace", fontsize=10)
-save("quickstart.png", fig)
+fig.colorbar(plt.cm.ScalarMappable(norm=NORM, cmap=CMAP), cax=ax_cb,
+             label="width (m)", extend="max")
+save("abstract.png", fig, tight=False)
 
-# 3. net_vs_lines.png: zoom on one junction, net dashed vs lines solid -----------
+# 2. quickstart.png: labels + lines | station cells colored by width -------------
 
-junction_r0, junction_c0 = 181, 176  # net path 3's outlet, where it meets path 1
-r0, r1 = junction_r0 - 22, junction_r0 + 22
-c0, c1 = junction_c0 - 15, junction_c0 + 30
+fig, axes = plt.subplots(1, 2, figsize=(14, 6.5))
+draw_labels_win(axes[0], mask_arr, labels_arr, FULL, "labels, lines")
+plot_geoms(axes[0], lines.geometry, grid, color="black", lw=1.0)
+draw_stations(axes[1], w_st, stations, grid, NORM, CMAP, marker=1.5)
+axes[1].set_title("width_regions_stations(labels, lines, spacing=50)",
+                  fontfamily="monospace", fontsize=9)
+width_colorbar(fig, NORM, CMAP, axes, fraction=0.025, pad=0.02)
+save("quickstart.png", fig, tight=False)
 
-fig, ax = plt.subplots(figsize=(7, 7))
-ax.imshow(mask_arr[r0:r1, c0:c1], cmap="gray_r", alpha=0.25)
-mapped, cmap, lookup, n = label_cmap(labels_arr[r0:r1, c0:c1])
-ax.imshow(mapped, cmap=cmap, vmin=0, vmax=max(n - 1, 1), interpolation="nearest")
-nearby_ids = np.unique(labels_arr[r0:r1, c0:c1])
-nearby_ids = nearby_ids[nearby_ids > 0]
-plot_geoms(ax, net[net["path_id"].isin(nearby_ids)].geometry, grid,
-           color="black", lw=1.6, ls="--", r0=r0, c0=c0)
-plot_geoms(ax, lines[lines["region_id"].isin(nearby_ids)].geometry, grid,
-           color="crimson", lw=1.6, r0=r0, c0=c0)
-ax.plot([], [], color="black", ls="--", lw=1.6, label="net (skeleton)")
-ax.plot([], [], color="crimson", lw=1.6, label="lines (region centerline)")
-ax.legend(loc="lower right", fontsize=8)
-ax.set_title("net vs. lines at one junction", fontfamily="monospace", fontsize=10)
-ax.set_axis_off()
-save("net_vs_lines.png", fig)
-
-# 4. tips_options.png: tips= / min_length= / neither, each showing net -----------
+# 3. tips_options.png: tips= / min_length= / neither, each showing net -----------
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    _, net_tips, _ = ramify.partition_priority(mask, root, tips=tips)
     _, net_ml, _ = ramify.partition_priority(mask, root, min_length=15.0)
     _, net_all, _ = ramify.partition_priority(mask, root)
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 6))
 for ax, net_i, title in [
-    (axes[0], net_tips, "tips=tips (28 tips)"),
-    (axes[1], net_ml, "min_length=15 (61 paths)"),
-    (axes[2], net_all, "neither (66 paths)"),
+    (axes[0], net, f"tips=tips ({len(tips)} tips)"),
+    (axes[1], net_ml, f"min_length=15 ({net_ml['path_id'].nunique()} paths)"),
+    (axes[2], net_all, f"neither ({net_all['path_id'].nunique()} paths)"),
 ]:
     ax.imshow(mask_arr, cmap="gray_r", alpha=0.25)
     cmap = plt.get_cmap("hsv")
-    n = net_i["path_id"].nunique()
     ids = sorted(net_i["path_id"].unique())
     lookup = {pid: i for i, pid in enumerate(ids)}
     for _, row in net_i.iterrows():
@@ -243,20 +285,44 @@ for ax, net_i, title in [
     ax.set_axis_off()
 save("tips_options.png", fig)
 
-# 5. partition_methods.png: partition_priority vs partition_nearest --------------
+# 4. widths_stations.png: zoom on one junction, centerline + stations + cells -----
 
-labels_near, net_near, lines_near = ramify.partition_nearest(mask, root, tips=tips)
+win = BRANCH_WIN
+near_ids = np.unique(crop(labels_arr, win))
+near_ids = near_ids[near_ids > 0]
+st_win = stations[stations["region_id"].isin(near_ids)]
 
-fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
-cmap, lookup, n = draw_labels(axes[0], mask_arr, labels_arr, "partition_priority")
-plot_net_colored(axes[0], net, "path_id", cmap, lookup, n, grid)
-cmap2, lookup2, n2 = draw_labels(axes[1], mask_arr, values(labels_near), "partition_nearest")
-plot_net_colored(axes[1], net_near, "path_id", cmap2, lookup2, n2, grid)
+fig, ax = plt.subplots(figsize=(10, 6))
+draw_stations(ax, w_st, st_win, grid, NORM, CMAP, win=win, cell_lw=0.7, marker=4,
+              centerlines=lines[lines["region_id"].isin(near_ids)].geometry)
+ax.plot([], [], color="crimson", lw=1.2, label="centerline (lines)")
+ax.plot([], [], "o", color="black", mfc="white", markersize=4, mew=0.6, label="station")
+ax.plot([], [], color="black", lw=0.7, label="station cell")
+ax.legend(loc="center right", fontsize=8)
+ax.set_title("width_regions_stations(labels, lines, spacing=50)",
+             fontfamily="monospace", fontsize=9)
+width_colorbar(fig, NORM, CMAP, ax, fraction=0.03, pad=0.02)
+save("widths_stations.png", fig, tight=False)
+
+# 5. partition_methods.png: priority vs nearest, zoomed on a junction -----------
+
+labels_near, net_near, _ = ramify.partition_nearest(mask, root, tips=tips)
+win = JUNCTION_WIN
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+for ax, lab, net_i, title in [
+    (axes[0], labels_arr, net, "partition_priority"),
+    (axes[1], values(labels_near), net_near, "partition_nearest"),
+]:
+    cmap, lookup, n = draw_labels_win(ax, mask_arr, lab, win, title)
+    plot_net_colored(ax, net_i, "path_id", cmap, lookup, n, grid, r0=win[0], c0=win[2])
+    ax.set_xlim(-0.5, win[3] - win[2] - 0.5)
+    ax.set_ylim(win[1] - win[0] - 0.5, -0.5)
 save("partition_methods.png", fig)
 
 # 6. level.png: level="path" vs level="segment" -----------------------------------
 
-labels_seg, net_seg, lines_seg = ramify.partition_priority(mask, root, tips=tips, level="segment")
+labels_seg, net_seg, _ = ramify.partition_priority(mask, root, tips=tips, level="segment")
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 cmap, lookup, n = draw_labels(axes[0], mask_arr, labels_arr, 'level="path"')
@@ -265,75 +331,20 @@ cmap2, lookup2, n2 = draw_labels(axes[1], mask_arr, values(labels_seg), 'level="
 plot_net_colored(axes[1], net_seg, "segment_id", cmap2, lookup2, n2, grid)
 save("level.png", fig)
 
-# 7. widths_regions.png: interpolate laplace / nearest / stations ----------------
+# 7. widths_regions.png: interpolate laplace / nearest ----------------------------
 
-w_lap = w_whole
-w_near = values(ramify.width_regions_interpolate(labels, lines, method="nearest"))
-w_st, stations = ramify.width_regions_stations(labels, lines, spacing=50)
-w_st = values(w_st)
-
-NORM, CMAP, BINS = width_norm_cmap(w_lap, w_near, w_st)
-print(f"width bins ({len(BINS)}): {BINS}")
-
-fig, axes = plt.subplots(1, 3, figsize=(17, 6.5))
+fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 for ax, arr, title in [
     (axes[0], w_lap, 'width_regions_interpolate(..., method="laplace")'),
     (axes[1], w_near, 'width_regions_interpolate(..., method="nearest")'),
 ]:
-    im = ax.imshow(arr, cmap=CMAP, norm=NORM, interpolation="nearest")
+    ax.imshow(arr, cmap=CMAP, norm=NORM, interpolation="nearest")
     ax.set_title(title, fontfamily="monospace", fontsize=9)
     ax.set_axis_off()
-im = axes[2].imshow(w_st, cmap=CMAP, norm=NORM, interpolation="nearest")
-xs = [p.x for p in stations["station"]]
-ys = [p.y for p in stations["station"]]
-rr, cc = grid.to_rc(np.asarray(xs), np.asarray(ys))
-axes[2].plot(cc, rr, "k.", markersize=2)
-plot_geoms(axes[2], stations.geometry, grid, color="black", lw=0.4, alpha=0.6)
-axes[2].set_title("width_regions_stations(..., spacing=50)", fontfamily="monospace", fontsize=9)
-axes[2].set_axis_off()
-fig.colorbar(
-    plt.cm.ScalarMappable(norm=NORM, cmap=CMAP),
-    ax=axes, fraction=0.025, pad=0.02, label="width (m)", extend="max",
-)
+width_colorbar(fig, NORM, CMAP, axes, fraction=0.025, pad=0.02)
 save("widths_regions.png", fig, tight=False)
 
-# 8. single_shape.png: one region, standalone centerline/width_interpolate/width_stations
-
-region = labels == DEMO_PATH_ID
-region_bool = values(region) > 0
-bbox = bbox_of(region_bool)
-r0, r1, c0, c1 = bbox
-
-line = ramify.centerline(region)
-w_single = values(ramify.width_interpolate(region, line))
-w_st_single, stations_single = ramify.width_stations(region, line, spacing=50)
-w_st_single = values(w_st_single)
-
-norm_s, cmap_s, _ = width_norm_cmap(w_single, w_st_single)
-
-fig, axes = plt.subplots(1, 3, figsize=(15, 5.5))
-
-axes[0].imshow(region_bool[r0:r1, c0:c1], cmap="gray_r", alpha=0.35)
-plot_geoms(axes[0], [line], grid, color="crimson", lw=1.8, r0=r0, c0=c0)
-axes[0].set_title("centerline(shape)", fontfamily="monospace", fontsize=10)
-axes[0].set_axis_off()
-
-im = axes[1].imshow(w_single[r0:r1, c0:c1], cmap=cmap_s, norm=norm_s, interpolation="nearest")
-axes[1].set_title("width_interpolate(shape, line)", fontfamily="monospace", fontsize=10)
-axes[1].set_axis_off()
-
-im = axes[2].imshow(w_st_single[r0:r1, c0:c1], cmap=cmap_s, norm=norm_s, interpolation="nearest")
-plot_geoms(axes[2], stations_single.geometry, grid, color="black", lw=0.6, r0=r0, c0=c0)
-axes[2].set_title("width_stations(shape, line, spacing=50)", fontfamily="monospace", fontsize=10)
-axes[2].set_axis_off()
-
-fig.colorbar(
-    plt.cm.ScalarMappable(norm=norm_s, cmap=cmap_s),
-    ax=axes, fraction=0.025, pad=0.02, label="width (m)", extend="max",
-)
-save("single_shape.png", fig, tight=False)
-
-# 9. open_boundary.png: widths without / with open_boundary ----------------------
+# 8. open_boundary.png: widths without / with open_boundary ----------------------
 
 rr, cc = np.ogrid[: mask_arr.shape[0], : mask_arr.shape[1]]
 open_boundary = (~mask_arr) & (rr >= root[0] - 10) & (cc <= root[1] + 20)
@@ -347,11 +358,11 @@ with warnings.catch_warnings():
         ramify.width_regions_interpolate(labels_ob, lines_ob, open_boundary=open_boundary)
     )
 
-norm_o, cmap_o, _ = width_norm_cmap(w_whole, w_ob)
+norm_o, cmap_o, _ = width_norm_cmap(w_lap, w_ob)
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
 for ax, arr, title, mark in [
-    (axes[0], w_whole, "width_regions_interpolate(labels, lines)", False),
+    (axes[0], w_lap, "width_regions_interpolate(labels, lines)", False),
     (axes[1], w_ob, "..., open_boundary=open_boundary", True),
 ]:
     ax.imshow(arr, cmap=cmap_o, norm=norm_o, interpolation="nearest")
@@ -362,8 +373,29 @@ for ax, arr, title, mark in [
         )
     ax.set_title(title, fontfamily="monospace", fontsize=9)
     ax.set_axis_off()
-fig.colorbar(
-    plt.cm.ScalarMappable(norm=norm_o, cmap=cmap_o),
-    ax=axes, fraction=0.03, pad=0.04, label="width (m)", extend="max",
-)
+width_colorbar(fig, norm_o, cmap_o, axes, fraction=0.03, pad=0.04)
 save("open_boundary.png", fig, tight=False)
+
+# 9. single_shape.png: one region; centerline + station widths, then interpolate --
+
+region = labels == DEMO_PATH_ID
+region_bool = values(region) > 0
+win = bbox_of(region_bool)
+
+line = ramify.centerline(region)
+w_st_single, stations_single = ramify.width_stations(region, line, spacing=50)
+w_st_single = values(w_st_single)
+w_single = values(ramify.width_interpolate(region, line))
+
+norm_s, cmap_s, _ = width_norm_cmap(w_st_single, w_single)
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 7.5))
+draw_stations(axes[0], w_st_single, stations_single, grid, norm_s, cmap_s, win=win,
+              cell_lw=0.7, marker=4, centerlines=[line])
+axes[0].set_title("centerline(shape) + width_stations(shape, line, spacing=50)",
+                  fontfamily="monospace", fontsize=9)
+axes[1].imshow(crop(w_single, win), cmap=cmap_s, norm=norm_s, interpolation="nearest")
+axes[1].set_title("width_interpolate(shape, line)", fontfamily="monospace", fontsize=9)
+axes[1].set_axis_off()
+width_colorbar(fig, norm_s, cmap_s, axes, fraction=0.03, pad=0.02)
+save("single_shape.png", fig, tight=False)
