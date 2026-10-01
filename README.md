@@ -154,6 +154,24 @@ keyed by `segment_id`.
 
 ![level](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/level.png)
 
+### Smoothing
+
+Centerlines follow pixel centers, so they step like a staircase. That makes
+`length` read a few percent long and station widths (area / length) read a
+few percent short. Pass `smooth` to smooth each centerline after it is
+traced:
+
+```python
+labels, net, lines = ramify.partition_priority(mask, root, tips=tips, smooth="chaikin")
+line = ramify.centerline(shape, smooth="chaikin")
+```
+
+`smooth` is `None` (default), `"chaikin"`, `"taubin"`, or any function that
+takes and returns a `LineString` (e.g. `functools.partial(shapelysmooth.chaikin_smooth, iters=2)`).
+Line ends stay where they were, and `length` is measured on the smoothed
+line. `net` is not smoothed. If a smoothed line leaves the shape, a
+`ValueError` is raised; use lighter smoothing or `smooth=None`.
+
 ### Width method
 
 Instead of stations, width can be measured exactly on the centerline (twice

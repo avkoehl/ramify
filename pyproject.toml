@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramify"
-version = "2.1.0"
+version = "2.1.1"
 description = "Segment and measure branching shapes: centerlines, hierarchical space partitioning, and width"
 keywords = [
     "centerline",
@@ -36,6 +36,7 @@ dependencies = [
     "geopandas",
     "xarray",
     "rioxarray",
+    "shapelysmooth>=0.2.1",
 ]
 
 [project.optional-dependencies]

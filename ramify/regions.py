@@ -9,8 +9,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from ._io import make_grid, local_half_width, crop_grid, rasterize_line, region_groups
-from .width import _laplace, _nearest, _nearest_flat, _compute_stations, _rasterize_widths, _polygonize_mask
+from ._io import make_grid, local_half_width, crop_grid, rasterize_line, region_groups, polygonize_mask
+from .width import _laplace, _nearest, _nearest_flat, _compute_stations, _rasterize_widths
 
 
 def width_regions_interpolate(labels, lines, method="laplace", open_boundary=None,
@@ -156,7 +156,7 @@ def width_regions_stations(labels, lines, spacing=None, n_stations=None, pixel_s
         region_local = np.zeros((r1 - r0, c1 - c0), dtype=bool)
         region_local[rows - r0, cols - c0] = True
 
-        shape_poly = _polygonize_mask(region_local, sub_grid)
+        shape_poly = polygonize_mask(region_local, sub_grid)
         if not line.intersects(shape_poly):
             n_no_line += 1
             continue

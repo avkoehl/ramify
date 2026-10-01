@@ -164,3 +164,43 @@ def test_disk_cut_fill_keeps_path_pixel_connected():
     path = [(3, 0), (4, 1), (4, 2), (3, 3), (3, 4), (3, 5)]
     assert disk_cut(path, half_width, mask) == [(3, 0), (3, 5)]
     assert disk_cut(path, half_width, mask, fill=True) == [(3, c) for c in range(6)]
+
+
+def test_smooth_keeps_ends_and_shortens_staircase(flared_bar):
+    mask, root, tip = flared_bar
+    raw = ramify.centerline(mask, root=root, tip=tip)
+    smooth = ramify.centerline(mask, root=root, tip=tip, smooth="chaikin")
+    assert smooth.coords[0] == raw.coords[0]
+    assert smooth.coords[-1] == raw.coords[-1]
+    assert smooth.length <= raw.length
+
+
+def test_smooth_accepts_callable(straight_bar):
+    mask, root, tip = straight_bar
+    calls = []
+
+    def fn(line):
+        calls.append(line)
+        return line
+
+    line = ramify.centerline(mask, root=root, tip=tip, smooth=fn)
+    assert len(calls) == 1
+    assert line.length == pytest.approx(17.0)
+
+
+def test_smooth_leaving_mask_raises(straight_bar):
+    mask, root, tip = straight_bar
+
+    def shift(line):
+        from shapely import affinity
+
+        return affinity.translate(line, yoff=5.0)
+
+    with pytest.raises(ValueError, match="leaves the shape"):
+        ramify.centerline(mask, root=root, tip=tip, smooth=shift)
+
+
+def test_smooth_invalid_raises(straight_bar):
+    mask, _, _ = straight_bar
+    with pytest.raises(ValueError, match="smooth must be"):
+        ramify.centerline(mask, smooth="gaussian")

@@ -220,3 +220,31 @@ def test_end_cuts_keep_toy_network_intact(toy_dataset):
     mask_bool = np.asarray(mask.values) == 1
     df = _build_network(mask_bool, root, tips, None, "area", None, 1.0)
     assert _network_is_intact(df, mask_bool)
+
+
+def test_smooth_lines_keep_ends_and_recompute_length(toy_dataset):
+    mask, root, tips = toy_dataset
+    labels_raw, net_raw, raw = ramify.partition_priority(mask, root, tips=tips)
+    labels, net, smooth = ramify.partition_priority(mask, root, tips=tips, smooth="chaikin")
+
+    np.testing.assert_array_equal(np.asarray(labels), np.asarray(labels_raw))
+    assert net.geometry.geom_equals(net_raw.geometry).all()  # net is never smoothed
+    np.testing.assert_allclose(smooth["length"], smooth.geometry.length)
+    for a, b in zip(raw.geometry, smooth.geometry):
+        if a.is_empty:
+            continue
+        assert b.coords[0] == a.coords[0]
+        assert b.coords[-1] == a.coords[-1]
+        assert b.length <= a.length
+
+
+def test_smooth_leaving_mask_raises_with_region(toy_dataset):
+    from shapely import affinity
+
+    mask, root, tips = toy_dataset
+
+    def shift(line):
+        return affinity.translate(line, xoff=1e6)
+
+    with pytest.raises(ValueError, match="region 1 leaves the shape"):
+        ramify.partition_nearest(mask, root, tips=tips, smooth=shift)

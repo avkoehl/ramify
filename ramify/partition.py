@@ -18,6 +18,9 @@ from ._io import (
     local_half_width,
     region_groups,
     relocate_line,
+    polygonize_mask,
+    smoother,
+    smooth_line,
 )
 from ._skeleton import (
     skeleton_nodes,
@@ -38,8 +41,8 @@ _EDGES = [(0, 1, 1.0), (1, 0, 1.0), (1, 1, SQRT2), (1, -1, SQRT2)]
 
 
 def partition_priority(mask, root, tips=None, min_length=None, path_by="area",
-                        level="path", open_boundary=None, pixel_size=None,
-                        progress=None):
+                        level="path", open_boundary=None, smooth=None,
+                        pixel_size=None, progress=None):
     """Assign every mask pixel to a path.
 
     Builds the tip -> root network (shared with `partition_nearest`; see
@@ -56,9 +59,15 @@ def partition_priority(mask, root, tips=None, min_length=None, path_by="area",
     `lines` is a `GeoDataFrame`, one row per positive label in `labels`, each
     a centerline recomputed from that label's own pixels (not `net`'s
     skeleton, which is partitioning scaffolding) -- see `_region_lines`.
+
+    `smooth` smooths each of `lines` after it is computed, as in `centerline`
+    (`None`, `"chaikin"`, `"taubin"`, or a callable); `length` is measured on
+    the smoothed line. `net` is never smoothed. Raises `ValueError` if a
+    smoothed line leaves the mask.
     """
     if level not in ("path", "segment"):
         raise ValueError(f"level must be 'path' or 'segment', got {level!r}")
+    smooth_fn = smoother(smooth)
 
     mask_arr, grid = make_grid(mask, pixel_size)
     mask_bool = mask_arr > 0
@@ -71,21 +80,23 @@ def partition_priority(mask, root, tips=None, min_length=None, path_by="area",
     if level == "segment":
         allocation = _subdivide_by_segment(allocation, df, mask_bool.shape)
 
-    lines = _region_lines(df, allocation, grid, level)
+    lines = _region_lines(df, allocation, grid, level, smooth_fn)
     return grid.wrap(allocation), _to_geodataframe(df, grid), lines
 
 
 def partition_nearest(mask, root, tips=None, min_length=None, path_by="area",
-                       level="path", open_boundary=None, pixel_size=None):
+                       level="path", open_boundary=None, smooth=None,
+                       pixel_size=None):
     """Assign every mask pixel to the geodesically nearest path (or segment).
 
     Same network construction as `partition_priority`, but every mask pixel
     goes to whichever path (or, with `level="segment"`, segment) it can reach
     by the shortest within-mask route -- no ordering, no radius limits.
-    Returns `(labels, net, lines)`; see `partition_priority`.
+    Returns `(labels, net, lines)`; `smooth` as in `partition_priority`.
     """
     if level not in ("path", "segment"):
         raise ValueError(f"level must be 'path' or 'segment', got {level!r}")
+    smooth_fn = smoother(smooth)
 
     mask_arr, grid = make_grid(mask, pixel_size)
     mask_bool = mask_arr > 0
@@ -98,7 +109,7 @@ def partition_nearest(mask, root, tips=None, min_length=None, path_by="area",
     if level == "segment":
         allocation = _subdivide_by_segment(allocation, df, mask_bool.shape)
 
-    lines = _region_lines(df, allocation, grid, level)
+    lines = _region_lines(df, allocation, grid, level, smooth_fn)
     return grid.wrap(allocation), _to_geodataframe(df, grid), lines
 
 
@@ -462,7 +473,7 @@ def _compute_region_line(component_bool, start, end, grid):
     return relocate_line(line_local, r0, c0, grid)
 
 
-def _region_lines(df, allocation, grid, level):
+def _region_lines(df, allocation, grid, level, smooth_fn=None):
     # One recomputed centerline per positive label in `allocation`. See
     # DESIGN.md addendum "Computing region centerlines" for the algorithm and
     # "Fallbacks" for the source="diameter"/"empty" cases below.
@@ -475,6 +486,7 @@ def _region_lines(df, allocation, grid, level):
 
     n_diameter = n_empty = 0
     total_islands = 0
+    shape_poly = polygonize_mask(allocation > 0, grid) if smooth_fn is not None else None
 
     for label in labels_present:
         region_bool = allocation == label
@@ -517,6 +529,10 @@ def _region_lines(df, allocation, grid, level):
             else:
                 line = _compute_region_line(winning_mask, start, end, grid)
                 src = "network"
+
+        line = smooth_line(
+            line, smooth_fn, shape_poly, grid.pixel_size, f"line for region {label}"
+        )
 
         region_id.append(int(label))
         path_id.append(int(label) if level == "path" else int(seg_to_path[label]))

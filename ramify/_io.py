@@ -248,3 +248,65 @@ def rasterize_line(line, grid, all_touched=True):
         dtype=np.uint8,
     )
     return arr.astype(bool)
+
+
+def polygonize_mask(mask_bool, grid):
+    """The mask's pixels as one shapely (Multi)Polygon in grid coordinates."""
+    from rasterio.features import shapes as raster_shapes
+    from shapely.geometry import shape as shapely_shape
+    from shapely.ops import unary_union
+
+    polys = [
+        shapely_shape(geom)
+        for geom, _ in raster_shapes(
+            mask_bool.astype(np.uint8), mask=mask_bool, transform=grid.transform
+        )
+    ]
+    return unary_union(polys)
+
+
+def smoother(smooth):
+    """Resolve the `smooth` argument to a `LineString -> LineString` callable.
+
+    `None` -> no smoothing (returns None). `"chaikin"` / `"taubin"` ->
+    shapelysmooth's corner-cutting / Taubin smoother (both keep the line's
+    endpoints). Chaikin runs 3 iterations, not shapelysmooth's 5: the curve
+    has converged by then (<0.03% length change on the bundled data) and each
+    extra iteration doubles the vertex count. Taubin uses shapelysmooth's
+    defaults. Any callable is used as given, e.g.
+    `functools.partial(shapelysmooth.chaikin_smooth, iters=2)`.
+    """
+    if smooth is None or callable(smooth):
+        return smooth
+    from functools import partial
+
+    from shapelysmooth import chaikin_smooth, taubin_smooth
+
+    named = {"chaikin": partial(chaikin_smooth, iters=3), "taubin": taubin_smooth}
+    if smooth not in named:
+        raise ValueError(
+            f"smooth must be None, 'chaikin', 'taubin', or a callable, got {smooth!r}"
+        )
+    return named[smooth]
+
+
+def smooth_line(line, fn, shape_poly, pixel_size, what="line"):
+    """Apply smoother `fn` to `line`; raise if the result leaves `shape_poly`.
+
+    The line is first densified to `pixel_size` vertex spacing: the straight
+    end cuts (`disk_cut`) are single long segments, and vertex-averaging
+    smoothers (Taubin) otherwise drag the vertex beside one far off the axis.
+    The containment test allows `1e-6 * pixel_size` of line outside the shape,
+    absorbing float specks where the line crosses a diagonal pixel pinch.
+    """
+    if fn is None or line.is_empty or len(line.coords) < 3:
+        return line
+    import shapely
+
+    out = fn(shapely.segmentize(line, pixel_size))
+    if out.difference(shape_poly).length > 1e-6 * pixel_size:
+        raise ValueError(
+            f"smoothed {what} leaves the shape; use a lighter smoothing (e.g. "
+            "fewer iterations or steps) or smooth=None"
+        )
+    return out

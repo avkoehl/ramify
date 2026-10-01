@@ -11,7 +11,7 @@ from shapely import voronoi_polygons
 from shapely.geometry import MultiPoint
 from shapely.strtree import STRtree
 
-from ._io import make_grid, local_half_width, rasterize_line
+from ._io import make_grid, local_half_width, rasterize_line, polygonize_mask
 
 SQRT2 = np.sqrt(2.0)
 # 8-connected stencil; diagonals weighted 1/sqrt(2) for isotropy (and so a pixel
@@ -115,7 +115,7 @@ def width_stations(mask, line, spacing=None, n_stations=None, pixel_size=None):
     mask_bool = mask_arr > 0
     _check_line_bounds(line, grid)
 
-    shape_poly = _polygonize_mask(mask_bool, grid)
+    shape_poly = polygonize_mask(mask_bool, grid)
     if not line.intersects(shape_poly):
         raise ValueError("line does not intersect the mask")
 
@@ -203,20 +203,6 @@ def _check_line_bounds(line, grid):
     tol = 1e-6 * max(grid.pixel_size, 1.0)
     if lx1 < xmin - tol or lx0 > xmax + tol or ly1 < ymin - tol or ly0 > ymax + tol:
         raise ValueError("line bounds fall outside the grid")
-
-
-def _polygonize_mask(mask_bool, grid):
-    from rasterio.features import shapes as raster_shapes
-    from shapely.geometry import shape as shapely_shape
-    from shapely.ops import unary_union
-
-    polys = [
-        shapely_shape(geom)
-        for geom, _ in raster_shapes(
-            mask_bool.astype(np.uint8), mask=mask_bool, transform=grid.transform
-        )
-    ]
-    return unary_union(polys)
 
 
 def _rasterize_widths(cells, widths, mask_bool, grid, fallback=True):

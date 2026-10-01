@@ -5,7 +5,7 @@ import numpy as np
 from skimage.measure import label as cc_label
 from shapely.geometry import LineString
 
-from ._io import make_grid, check_point, half_width_pixels
+from ._io import make_grid, check_point, half_width_pixels, polygonize_mask, smoother, smooth_line
 from ._skeleton import (
     skeleton_nodes,
     snap_paths,
@@ -17,7 +17,7 @@ from ._skeleton import (
 )
 
 
-def centerline(mask, root=None, tip=None, pixel_size=None) -> LineString:
+def centerline(mask, root=None, tip=None, smooth=None, pixel_size=None) -> LineString:
     """One `LineString` through a single-thread shape.
 
     - `root` and `tip` given: the skeleton path between them.
@@ -35,9 +35,15 @@ def centerline(mask, root=None, tip=None, pixel_size=None) -> LineString:
     heaviest (widest) one that `partition_priority`/`partition_nearest` would
     pick as the mainstem -- `centerline(mask, root)` may pick a different
     branch than partition path 1, and that is expected.
+
+    `smooth` takes the pixel staircase out of the line: `None` (default, the
+    raw pixel path), `"chaikin"`, `"taubin"`, or a `LineString -> LineString`
+    callable. Endpoints are kept. Raises `ValueError` if the smoothed line
+    leaves the mask.
     """
     if tip is not None and root is None:
         raise ValueError("tip requires root to also be given")
+    smooth_fn = smoother(smooth)
 
     mask_arr, grid = make_grid(mask, pixel_size)
     mask_bool = mask_arr > 0
@@ -121,7 +127,12 @@ def centerline(mask, root=None, tip=None, pixel_size=None) -> LineString:
     rows = np.array([n[0] for n in path_nodes])
     cols = np.array([n[1] for n in path_nodes])
     xs, ys = grid.to_xy(rows, cols)
-    return LineString(np.column_stack([xs, ys]))
+    line = LineString(np.column_stack([xs, ys]))
+    if smooth_fn is not None:
+        line = smooth_line(
+            line, smooth_fn, polygonize_mask(mask_bool, grid), grid.pixel_size, "centerline"
+        )
+    return line
 
 
 def _warn_if_branching(pruned_nodes):
