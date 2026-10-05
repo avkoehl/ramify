@@ -8,16 +8,18 @@ from scipy.ndimage import distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from skimage.measure import label as cc_label
-from skimage.segmentation import watershed
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
+from shapely.ops import substring
 
 from ._io import (
     make_grid,
+    crop_grid,
     check_point,
     half_width_pixels,
     local_half_width,
     region_groups,
     relocate_line,
+    rasterize_line,
     polygonize_mask,
     smoother,
     smooth_line,
@@ -49,21 +51,24 @@ def partition_priority(mask, root, tips=None, min_length=None, path_by="area",
     `_build_network`), then claims territory in ascending `path_id` (the
     mainstem, path 1, first): each path claims mask pixels within some of its
     segments' local half-width, measured geodesically, so a wide-but-farther
-    path can reach a pixel a narrow-but-nearer one cannot. Unclaimed remainder
-    is watershed-filled.
+    path can reach a pixel a narrow-but-nearer one cannot. Each unclaimed
+    pixel then joins the geodesically nearest claimed one.
 
     Returns `(labels, net, lines)`: `labels` is a `uint32` raster (0 outside
     the mask), `path_id` when `level="path"` or `segment_id` when
     `level="segment"`. `net` is a `GeoDataFrame`, one row per segment -- the
     routing record that explains the decomposition and `path_id` order.
-    `lines` is a `GeoDataFrame`, one row per positive label in `labels`, each
-    a centerline recomputed from that label's own pixels (not `net`'s
-    skeleton, which is partitioning scaffolding) -- see `_region_lines`.
+    `lines` is a `GeoDataFrame`, one row per positive label in `labels`. At
+    path level each is a centerline recomputed from that path's own pixels
+    (not `net`'s skeleton, which is partitioning scaffolding) -- see
+    `_region_lines`. At segment level, each path's line is cut where its
+    junctions project onto it, and each segment's region is the part of its
+    path's region geodesically nearest its piece -- see `_split_by_segment`.
 
-    `smooth` smooths each of `lines` after it is computed, as in `centerline`
-    (`None`, `"chaikin"`, `"taubin"`, or a callable); `length` is measured on
-    the smoothed line. `net` is never smoothed. Raises `ValueError` if a
-    smoothed line leaves the mask.
+    `smooth` smooths each path line after it is computed, as in `centerline`
+    (`None`, `"chaikin"`, `"taubin"`, or a callable), before any segment
+    cuts; `length` is measured on the smoothed line. `net` is never smoothed.
+    Raises `ValueError` if a smoothed line leaves the mask.
     """
     if level not in ("path", "segment"):
         raise ValueError(f"level must be 'path' or 'segment', got {level!r}")
@@ -77,10 +82,9 @@ def partition_priority(mask, root, tips=None, min_length=None, path_by="area",
     path_seed = _rasterize_labels(df, mask_bool.shape, "path_id")
     allocation = _priority_allocate(mask_bool, path_seed, open_boundary, progress)
 
+    lines = _region_lines(df, allocation, grid, smooth_fn)
     if level == "segment":
-        allocation = _subdivide_by_segment(allocation, df, mask_bool.shape)
-
-    lines = _region_lines(df, allocation, grid, level, smooth_fn)
+        allocation, lines = _split_by_segment(allocation, df, lines, grid)
     return grid.wrap(allocation), _to_geodataframe(df, grid), lines
 
 
@@ -90,8 +94,9 @@ def partition_nearest(mask, root, tips=None, min_length=None, path_by="area",
     """Assign every mask pixel to the geodesically nearest path (or segment).
 
     Same network construction as `partition_priority`, but every mask pixel
-    goes to whichever path (or, with `level="segment"`, segment) it can reach
-    by the shortest within-mask route -- no ordering, no radius limits.
+    goes to whichever path it can reach by the shortest within-mask route --
+    no ordering, no radius limits. `level="segment"` then splits each path's
+    region as in `partition_priority`.
     Returns `(labels, net, lines)`; `smooth` as in `partition_priority`.
     """
     if level not in ("path", "segment"):
@@ -106,10 +111,9 @@ def partition_nearest(mask, root, tips=None, min_length=None, path_by="area",
     path_seed = _rasterize_labels(df, mask_bool.shape, "path_id")
     allocation = _nearest_allocate(mask_bool, path_seed)
 
+    lines = _region_lines(df, allocation, grid, smooth_fn)
     if level == "segment":
-        allocation = _subdivide_by_segment(allocation, df, mask_bool.shape)
-
-    lines = _region_lines(df, allocation, grid, level, smooth_fn)
+        allocation, lines = _split_by_segment(allocation, df, lines, grid)
     return grid.wrap(allocation), _to_geodataframe(df, grid), lines
 
 
@@ -367,15 +371,9 @@ def _priority_allocate(mask_bool, seed_arr, open_boundary, progress):
     claimed = allocation > 0
     unclaimed = mask_bool & ~claimed
     if unclaimed.any() and claimed.any():
-        # connectivity=2 (8-connected) matches the skeleton/tree/_reach graph
-        # above; the 2D default (4-connected) can't flood into a mask pixel
-        # that touches the rest of the shape only at a corner.
-        allocation = watershed(
-            image=distance_transform_edt(~claimed),
-            markers=allocation,
-            mask=mask_bool,
-            connectivity=2,
-        ).astype(np.uint32)
+        # each unclaimed pixel joins the geodesically nearest claimed one;
+        # claimed pixels are seeds of themselves and keep their label
+        allocation = _nearest_allocate(mask_bool, allocation)
 
     return allocation
 
@@ -387,23 +385,11 @@ def _reach(mask_win, seed_rc, radii, R):
     #   dist_V(q) = R + min_s ( geodist(q, s) - radius(s) ),
     # and dist_V(q) <= R is exactly "some seed's radius reaches q".
     h, w = mask_win.shape
-    ys, xs = np.nonzero(mask_win)
+    ys, xs, ids, rows, cols, wts = _pixel_graph(mask_win)
     M = ys.size
     if M == 0:
         return np.zeros((h, w), dtype=bool)
-    ids = np.full((h, w), -1, dtype=np.int64)
-    ids[ys, xs] = np.arange(M)
     V = M  # super-source node id
-
-    rows, cols, wts = [], [], []
-    for dr, dc, step in _EDGES:
-        ny, nx = ys + dr, xs + dc
-        ok = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
-        nb = np.where(ok, ids[np.clip(ny, 0, h - 1), np.clip(nx, 0, w - 1)], -1)
-        keep = nb >= 0
-        rows.append(ids[ys[keep], xs[keep]])
-        cols.append(nb[keep])
-        wts.append(np.full(int(keep.sum()), step))
 
     sids = ids[seed_rc[:, 0], seed_rc[:, 1]]
     ok = sids >= 0
@@ -422,27 +408,59 @@ def _reach(mask_win, seed_rc, radii, R):
     return out
 
 
+def _pixel_graph(mask_bool):
+    # The mask's pixels as graph nodes, 8-connected, steps of 1 / sqrt(2):
+    # the same metric as the skeleton tree. Returns node coordinates, the
+    # (h, w) node-id raster (-1 off the mask), and forward-only edge lists
+    # (row ids, col ids, weights) to be used with directed=False.
+    h, w = mask_bool.shape
+    ys, xs = np.nonzero(mask_bool)
+    ids = np.full((h, w), -1, dtype=np.int64)
+    ids[ys, xs] = np.arange(ys.size)
+
+    rows, cols, wts = [], [], []
+    for dr, dc, step in _EDGES:
+        ny, nx = ys + dr, xs + dc
+        ok = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
+        nb = np.where(ok, ids[np.clip(ny, 0, h - 1), np.clip(nx, 0, w - 1)], -1)
+        keep = nb >= 0
+        rows.append(ids[ys[keep], xs[keep]])
+        cols.append(nb[keep])
+        wts.append(np.full(int(keep.sum()), step))
+    return ys, xs, ids, rows, cols, wts
+
+
 def _nearest_allocate(mask_bool, seed_arr):
-    markers = np.where(mask_bool, seed_arr, 0).astype(np.int64)
-    if not (markers > 0).any():
+    # Geodesic Voronoi: every mask pixel takes the label of the seed pixel it
+    # reaches by the shortest within-mask route (one multi-source Dijkstra;
+    # `sources` records which seed each pixel's shortest path started from).
+    # Seed pixels keep their own label; pixels no seed can reach stay 0.
+    ys, xs, _, rows, cols, wts = _pixel_graph(mask_bool)
+    seed_vals = seed_arr[ys, xs]
+    seed_ids = np.flatnonzero(seed_vals > 0)
+    if seed_ids.size == 0:
         raise ValueError("no seed pixels found inside the mask")
-    return watershed(
-        image=distance_transform_edt(markers == 0),
-        markers=markers,
-        mask=mask_bool,
-        connectivity=2,
-    ).astype(np.uint32)
+
+    M = ys.size
+    graph = csr_matrix(
+        (np.concatenate(wts), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(M, M),
+    )
+    _, _, sources = dijkstra(
+        graph, directed=False, indices=seed_ids, min_only=True, return_predecessors=True
+    )
+    out = np.zeros(mask_bool.shape, dtype=np.uint32)
+    reached = sources >= 0
+    out[ys[reached], xs[reached]] = seed_vals[sources[reached]]
+    return out
 
 
-def _reference_line_pixels(df, label, column):
-    # The ordered network pixels for one region, downstream -> upstream:
-    # its segments (one, for level="segment"; all of a path's, concatenated
-    # in already-downstream-to-upstream segment_id order, for level="path"),
-    # each reversed from its internal upstream->downstream storage, sharing
-    # each junction pixel once.
-    rows = df[df[column] == label]
-    if column == "path_id":
-        rows = rows.sort_values("segment_id")
+def _reference_line_pixels(df, path_id):
+    # The ordered network pixels for one path, downstream -> upstream: its
+    # segments, concatenated in (already downstream-to-upstream) segment_id
+    # order, each reversed from its internal upstream->downstream storage,
+    # sharing each junction pixel once.
+    rows = df[df["path_id"] == path_id].sort_values("segment_id")
     pixels = []
     for p in rows["pixels"]:
         seg = list(reversed(p))
@@ -450,6 +468,25 @@ def _reference_line_pixels(df, label, column):
             seg = seg[1:]
         pixels.extend(seg)
     return pixels
+
+
+def _winning_component(region_bool, ref_pixels):
+    # The connected component of a region its line belongs to: most
+    # reference pixels wins; ties -> larger component, then lower smallest
+    # flat index (region_groups' per-component indices are already sorted
+    # ascending). Returns (component labels, winner id, winner size).
+    comp = cc_label(region_bool, connectivity=2)
+    comp_groups = dict(region_groups(comp))
+    ref_counts = {}
+    for r, c in ref_pixels:
+        cid = comp[r, c]
+        if cid > 0:
+            ref_counts[cid] = ref_counts.get(cid, 0) + 1
+    winner = min(
+        comp_groups,
+        key=lambda cid: (-ref_counts.get(cid, 0), -comp_groups[cid].size, comp_groups[cid][0]),
+    )
+    return comp, winner, int(comp_groups[winner].size)
 
 
 def _compute_region_line(component_bool, start, end, grid):
@@ -473,52 +510,37 @@ def _compute_region_line(component_bool, start, end, grid):
     return relocate_line(line_local, r0, c0, grid)
 
 
-def _region_lines(df, allocation, grid, level, smooth_fn=None):
-    # One recomputed centerline per positive label in `allocation`. See
+def _region_lines(df, allocation, grid, smooth_fn=None):
+    # One recomputed centerline per path label in `allocation`. See
     # DESIGN.md addendum "Computing region centerlines" for the algorithm and
     # "Fallbacks" for the source="diameter"/"empty" cases below.
-    column = "path_id" if level == "path" else "segment_id"
-    seg_to_path = dict(zip(df["segment_id"], df["path_id"]))
-
-    labels_present = np.unique(allocation[allocation > 0]).tolist()
-    region_id, path_id, segment_id = [], [], []
-    length, area, source, island_pixels, geometry = [], [], [], [], []
-
+    records = []
     n_diameter = n_empty = 0
     total_islands = 0
     shape_poly = polygonize_mask(allocation > 0, grid) if smooth_fn is not None else None
 
-    for label in labels_present:
+    for label in np.unique(allocation[allocation > 0]).tolist():
         region_bool = allocation == label
         area_px = int(region_bool.sum())
-        ref_pixels = _reference_line_pixels(df, label, column)
+        ref_pixels = _reference_line_pixels(df, label)
 
-        comp = cc_label(region_bool, connectivity=2)
-        comp_groups = dict(region_groups(comp))
-        ref_counts = {}
-        for r, c in ref_pixels:
-            cid = comp[r, c]
-            if cid > 0:
-                ref_counts[cid] = ref_counts.get(cid, 0) + 1
-
-        # most reference pixels wins; ties -> larger component, then lower
-        # smallest flat index (region_groups' per-component indices are
-        # already sorted ascending)
-        winner = min(
-            comp_groups,
-            key=lambda cid: (-ref_counts.get(cid, 0), -comp_groups[cid].size, comp_groups[cid][0]),
-        )
+        comp, winner, winning_size = _winning_component(region_bool, ref_pixels)
         winning_mask = comp == winner
-        winning_size = int(comp_groups[winner].size)
         islands = area_px - winning_size
         total_islands += islands
 
         in_region = [i for i, (r, c) in enumerate(ref_pixels) if comp[r, c] == winner]
 
         if not in_region:
-            line = _compute_region_line(winning_mask, None, None, grid)
-            src = "diameter"
-            n_diameter += 1
+            try:
+                line = _compute_region_line(winning_mask, None, None, grid)
+                src = "diameter"
+                n_diameter += 1
+            except ValueError:
+                # a blob of a few pixels skeletonizes to one pixel: no ends
+                line = LineString()
+                src = "empty"
+                n_empty += 1
         else:
             start, end = ref_pixels[in_region[0]], ref_pixels[in_region[-1]]
             adjacent = abs(start[0] - end[0]) <= 1 and abs(start[1] - end[1]) <= 1
@@ -533,15 +555,7 @@ def _region_lines(df, allocation, grid, level, smooth_fn=None):
         line = smooth_line(
             line, smooth_fn, shape_poly, grid.pixel_size, f"line for region {label}"
         )
-
-        region_id.append(int(label))
-        path_id.append(int(label) if level == "path" else int(seg_to_path[label]))
-        segment_id.append(pd.NA if level == "path" else int(label))
-        length.append(float(line.length))
-        area.append(area_px * grid.pixel_size**2)
-        source.append(src)
-        island_pixels.append(int(islands))
-        geometry.append(line)
+        records.append((int(label), int(label), pd.NA, line, area_px, src, islands))
 
     if n_diameter:
         warnings.warn(
@@ -556,57 +570,144 @@ def _region_lines(df, allocation, grid, level, smooth_fn=None):
             f"{total_islands} region pixel(s), across disconnected components, "
             "were excluded from their region's centerline"
         )
+    return _lines_frame(records, grid)
 
+
+def _lines_frame(records, grid):
+    # records: (region_id, path_id, segment_id, line, area_px, source, islands)
     import geopandas as gpd
 
+    region_id, path_id, segment_id, geometry, area_px, source, islands = (
+        zip(*records) if records else ([],) * 7
+    )
     out = pd.DataFrame(
         {
-            "region_id": region_id,
-            "path_id": path_id,
+            "region_id": pd.array(region_id, dtype="int64"),
+            "path_id": pd.array(path_id, dtype="int64"),
             "segment_id": pd.array(segment_id, dtype="Int64"),
-            "length": length,
-            "area": area,
-            "source": source,
-            "island_pixels": island_pixels,
-            "geometry": geometry,
+            "length": [float(g.length) for g in geometry],
+            "area": [a * grid.pixel_size**2 for a in area_px],
+            "source": list(source),
+            "island_pixels": pd.array(islands, dtype="int64"),
+            "geometry": list(geometry),
         }
     )
     return gpd.GeoDataFrame(out, geometry="geometry", crs=grid.crs)
 
 
-def _subdivide_by_segment(path_allocation, df, shape):
-    # Subdivide each path's territory into segment-level territories. Each
-    # territory is seeded only by its own path's segments, so neighbouring
-    # paths' labels (e.g. shared junction pixels) never bleed across
-    # boundaries.
+def _cut_path_line(line, source, group, grid):
+    # Split one path's line into one piece per segment (`group`: the path's
+    # rows of `df`, in segment_id = downstream -> upstream order), cutting
+    # where each junction projects onto the line. The line runs downstream ->
+    # upstream when it came from the network; a "diameter" line has no set
+    # orientation, so it is flipped if its end is nearer the path's outlet.
+    # A segment whose junctions project onto the same spot (e.g. one lying
+    # wholly inside its parent's region, downstream of where the line
+    # starts) gets an empty piece.
+    n = len(group)
+    if line.is_empty:
+        return [LineString()] * n
+
+    def point(rc):
+        x, y = grid.to_xy(np.array([rc[0]]), np.array([rc[1]]))
+        return Point(float(x[0]), float(y[0]))
+
+    pixels = list(group["pixels"])
+    if source != "network":
+        outlet = point(pixels[0][-1])
+        if Point(line.coords[-1]).distance(outlet) < Point(line.coords[0]).distance(outlet):
+            line = LineString(line.coords[::-1])
+
+    # a segment's junction with the next one upstream is its own first pixel
+    cuts = [line.project(point(seg[0])) for seg in pixels[:-1]]
+    cuts = np.maximum.accumulate([0.0] + cuts + [line.length])
+    cuts[-1] = line.length
+    return [
+        substring(line, a, b) if b - a > 1e-9 * grid.pixel_size else LineString()
+        for a, b in zip(cuts[:-1], cuts[1:])
+    ]
+
+
+def _split_by_segment(path_allocation, df, path_lines, grid):
+    # Segment level from path level: each path's line (already smoothed) is
+    # cut into per-segment pieces (`_cut_path_line`), and each pixel of the
+    # path's region goes to the piece it can reach by the shortest route
+    # inside that region. Segment lines are those pieces, so they join end to
+    # end into the path line. A path with no usable line falls back to its
+    # network segments as seeds; region pixels no seed reaches (islands) go
+    # to the nearest labeled pixel.
+    shape = path_allocation.shape
     territories = dict(region_groups(path_allocation))
+    lines_by_path = {int(r.region_id): (r.geometry, r.source) for r in path_lines.itertuples()}
     out = np.zeros(shape, dtype=np.uint32)
+    records = []
+    n_no_region = 0
+    total_islands = 0
     _, w = shape
-    for path_id, group in df.groupby("path_id"):
+
+    for path_id, group in df.groupby("path_id", sort=True):
+        group = group.sort_values("segment_id")
         idx = territories.get(int(path_id))
         if idx is None:
             continue
         rows, cols = np.divmod(idx, w)
         r0, r1 = int(rows.min()), int(rows.max()) + 1
         c0, c1 = int(cols.min()), int(cols.max()) + 1
+        territory = np.zeros((r1 - r0, c1 - c0), dtype=bool)
+        territory[rows - r0, cols - c0] = True
+        sub_grid = crop_grid(grid, r0, c0, territory.shape)
 
-        territory = np.zeros((r1 - r0, c1 - c0), dtype=np.uint8)
-        territory[rows - r0, cols - c0] = 1
+        line, src = lines_by_path.get(int(path_id), (LineString(), "empty"))
+        pieces = _cut_path_line(line, src, group, grid)
+        seg_ids = group["segment_id"].tolist()
 
+        # downstream piece wins a pixel two pieces share at a cut
         seeds = np.zeros(territory.shape, dtype=np.uint32)
-        for _, row in group.iterrows():
-            rc = np.asarray(row["pixels"])
-            inside = (
-                (rc[:, 0] >= r0) & (rc[:, 0] < r1) & (rc[:, 1] >= c0) & (rc[:, 1] < c1)
-            )
-            rc = rc[inside]
-            seeds[rc[:, 0] - r0, rc[:, 1] - c0] = row["segment_id"]
-        seeds = np.where(territory == 1, seeds, 0)
-        if not (seeds > 0).any():
-            continue
+        for sid, piece in zip(seg_ids, pieces):
+            px = rasterize_line(piece, sub_grid, all_touched=True) & territory
+            seeds[px & (seeds == 0)] = sid
+        if not seeds.any():
+            for sid, seg in zip(seg_ids, group["pixels"]):
+                rc = np.asarray(seg).reshape(-1, 2) - (r0, c0)
+                ok = (
+                    (rc[:, 0] >= 0) & (rc[:, 0] < territory.shape[0])
+                    & (rc[:, 1] >= 0) & (rc[:, 1] < territory.shape[1])
+                )
+                rc = rc[ok]
+                hit = territory[rc[:, 0], rc[:, 1]] & (seeds[rc[:, 0], rc[:, 1]] == 0)
+                seeds[rc[hit, 0], rc[hit, 1]] = sid
+        if not seeds.any():
+            seeds[np.unravel_index(np.argmax(territory), territory.shape)] = seg_ids[0]
 
-        sub = _nearest_allocate(territory.astype(bool), seeds)
-        hit = sub > 0
-        out[r0:r1, c0:c1][hit] = sub[hit]
+        sub = _nearest_allocate(territory, seeds)
+        left = territory & (sub == 0)
+        if left.any():
+            _, (ii, jj) = distance_transform_edt(sub == 0, return_indices=True)
+            sub[left] = sub[ii[left], jj[left]]
+        out[r0:r1, c0:c1][territory] = sub[territory]
 
-    return out
+        for sid, piece in zip(seg_ids, pieces):
+            region = sub == sid
+            area_px = int(region.sum())
+            if area_px == 0:
+                n_no_region += 1
+                continue
+            ref = np.argwhere(rasterize_line(piece, sub_grid, all_touched=True) & region)
+            _, _, winning_size = _winning_component(region, map(tuple, ref))
+            islands = area_px - winning_size
+            total_islands += islands
+            piece_src = src if not piece.is_empty else "empty"
+            records.append((int(sid), int(path_id), int(sid), piece, area_px, piece_src, islands))
+
+    if n_no_region:
+        warnings.warn(
+            f"{n_no_region} segment(s) got no part of their path's line or "
+            "region (e.g. a segment lying inside its parent's region); they "
+            "have no label"
+        )
+    if total_islands:
+        warnings.warn(
+            f"{total_islands} segment-region pixel(s) lie in components apart "
+            "from their segment's line"
+        )
+    return out, _lines_frame(records, grid)

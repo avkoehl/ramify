@@ -248,3 +248,73 @@ def test_smooth_leaving_mask_raises_with_region(toy_dataset):
 
     with pytest.raises(ValueError, match="region 1 leaves the shape"):
         ramify.partition_nearest(mask, root, tips=tips, smooth=shift)
+
+
+def test_nearest_allocate_is_geodesic_not_euclidean(toy_dataset):
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    from ramify.partition import _build_network, _rasterize_labels, _nearest_allocate, _pixel_graph
+
+    # every pixel's label must be one whose seeds are at the minimum
+    # within-mask distance (checked per label, independently)
+    mask, root, tips = toy_dataset
+    mask_bool = np.asarray(mask.values) == 1
+    df = _build_network(mask_bool, root, tips, None, "area", None, 1.0)
+    seeds = _rasterize_labels(df, mask_bool.shape, "path_id")
+    out = _nearest_allocate(mask_bool, seeds)
+
+    ys, xs, _, rows, cols, wts = _pixel_graph(mask_bool)
+    graph = csr_matrix(
+        (np.concatenate(wts), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(ys.size, ys.size),
+    )
+    seed_vals = seeds[ys, xs]
+    labels = np.unique(seed_vals[seed_vals > 0])
+    dist = np.stack([
+        dijkstra(graph, directed=False, indices=np.flatnonzero(seed_vals == lab), min_only=True)
+        for lab in labels
+    ])
+    got = dist[np.searchsorted(labels, out[ys, xs]), np.arange(ys.size)]
+    np.testing.assert_allclose(got, dist.min(axis=0), atol=1e-9)
+
+
+def test_nearest_allocate_leaves_unreachable_pixels_zero():
+    from ramify.partition import _nearest_allocate
+
+    mask = np.zeros((5, 10), dtype=bool)
+    mask[:, 0:3] = True
+    mask[:, 6:10] = True  # detached blob with no seed
+    seeds = np.zeros(mask.shape, dtype=np.uint32)
+    seeds[2, 1] = 7
+    out = _nearest_allocate(mask, seeds)
+    assert (out[:, 0:3] == 7).all()
+    assert (out[:, 6:10] == 0).all()
+
+
+@pytest.mark.parametrize("smooth", [None, "chaikin"])
+@pytest.mark.parametrize("fn", ["partition_priority", "partition_nearest"])
+def test_segment_lines_are_pieces_of_path_line(toy_dataset, fn, smooth):
+    mask, root, tips = toy_dataset
+    partition = getattr(ramify, fn)
+    _, _, path_lines = partition(mask, root, tips=tips, smooth=smooth)
+    seg_labels, _, seg_lines = partition(
+        mask, root, tips=tips, level="segment", smooth=smooth
+    )
+    for path_id, group in seg_lines.groupby("path_id"):
+        path_line = path_lines.set_index("region_id").loc[path_id, "geometry"]
+        pieces = [g for g in group.sort_values("segment_id").geometry if not g.is_empty]
+        np.testing.assert_allclose(sum(p.length for p in pieces), path_line.length)
+        for a, b in zip(pieces[:-1], pieces[1:]):
+            assert np.allclose(a.coords[-1], b.coords[0])  # end to end, no gaps
+        assert np.allclose(pieces[0].coords[0], path_line.coords[0])
+        assert np.allclose(pieces[-1].coords[-1], path_line.coords[-1])
+
+
+def test_segment_level_labels_every_mask_pixel(toy_dataset):
+    mask, root, tips = toy_dataset
+    mask_bool = np.asarray(mask.values) == 1
+    labels, net, lines = ramify.partition_nearest(mask, root, tips=tips, level="segment")
+    arr = np.asarray(labels)
+    assert (arr[mask_bool] > 0).all()
+    assert (arr[~mask_bool] == 0).all()
+    assert set(lines["region_id"]) == set(np.unique(arr[arr > 0]).tolist())

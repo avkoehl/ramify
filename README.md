@@ -126,9 +126,9 @@ labels, net, lines = ramify.partition_nearest(mask, root, tips=tips)
 - **`partition_priority`**: branches claim space in order, biggest first,
   each out to its local half-width. Wide branches take more space at
   junctions, and tributaries do not cut into the mainstem.
-- **`partition_nearest`**: every pixel goes to the nearest branch centerline,
-  with no ordering and no width limit. It is simpler, but at junctions
-  tributaries cut into the mainstem.
+- **`partition_nearest`**: every pixel goes to the nearest branch, measured
+  along routes inside the shape, with no ordering and no width limit. It is
+  simpler, but at junctions tributaries cut into the mainstem.
 
 ![partition methods](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/partition_methods.png)
 
@@ -149,8 +149,10 @@ short, wide branch competes against a long, narrow one.
 
 `level="path"` (default) gives one region per path. `level="segment"` splits
 each path's region further, one region per segment (the piece between two
-junctions, or between a junction and a tip). `labels` and `lines` are then
-keyed by `segment_id`.
+junctions, or between a junction and a tip). Each path's centerline is cut
+where its junctions fall on it, and each pixel of the path's region goes to
+the nearest piece. The segment lines are those pieces, so they join end to end
+into the path's line. `labels` and `lines` are then keyed by `segment_id`.
 
 ![level](https://raw.githubusercontent.com/avkoehl/ramify/main/assets/level.png)
 
